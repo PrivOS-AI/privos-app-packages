@@ -1,4 +1,4 @@
-# Privos App Packages
+# PrivOS App Packages
 
 Packages for building apps on the [Privos](https://privos.ai) platform.
 
