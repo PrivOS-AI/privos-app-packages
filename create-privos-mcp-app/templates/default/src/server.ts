@@ -58,7 +58,7 @@ app.post('/mcp', (req, res) => {
 
   if (method === 'resources/read') {
     const html = `<!DOCTYPE html>
-<html><head><title>{{APP_NAME}}</title></head>
+<html><head><title>{{APP_NAME}}</title><style>html,body{margin:0;background:#F7F8FA;color:#1F2329}</style></head>
 <body><div id="root"></div>
 <script type="module" src="http://localhost:5173/src/ui/main.tsx"></script>
 </body></html>`;
