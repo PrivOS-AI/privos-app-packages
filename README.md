@@ -17,7 +17,7 @@ npx create-privos-mcp-app my-app
 cd my-app && npm install && npm run dev
 ```
 
-## What Is a Privos App?
+## What Is a PrivOS App?
 
 A standalone MCP server (Express + React) that integrates with Privos Chat rooms:
 
