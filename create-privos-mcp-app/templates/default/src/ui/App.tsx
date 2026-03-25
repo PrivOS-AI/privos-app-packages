@@ -1,5 +1,5 @@
 /**
- * Main React app component for the mini app UI.
+ * Main React app component for the MCP app UI.
  */
 import { PrivosAppProvider, usePrivosContext, useLists } from '@privos/app-react';
 

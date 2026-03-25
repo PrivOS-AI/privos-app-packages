@@ -51,8 +51,8 @@ import { PrivosAppProvider, usePrivosContext, useLists } from '@privos/app-react
 
 ## Documentation
 
-- [Developer Guide](https://github.com/PrivOS-AI/privos-dev-docs/blob/main/mini-app-platform/developer-guide.md)
-- [API Reference](https://github.com/PrivOS-AI/privos-dev-docs/blob/main/mini-app-platform/api-reference.md)
+- [Developer Guide](https://github.com/PrivOS-AI/privos-dev-docs/blob/main/mcp-app-platform/developer-guide.md)
+- [API Reference](https://github.com/PrivOS-AI/privos-dev-docs/blob/main/mcp-app-platform/api-reference.md)
 - [Demo App](https://github.com/PrivOS-AI/privos-demo-hrm)
 
 ## License

@@ -71,7 +71,7 @@ Wrap your app root with `PrivosAppProvider`. It creates a PostMessage-based MCP 
 
 ## Theme
 
-`usePrivosContext().theme` returns `'light'` or `'dark'`, updated in real-time when the Privos user toggles theme. See [Theme Integration docs](https://github.com/PrivOS-AI/privos-dev-docs/blob/main/mini-app-platform/developer-guide.md#7-theme-sync-lightdark-mode).
+`usePrivosContext().theme` returns `'light'` or `'dark'`, updated in real-time when the Privos user toggles theme. See [Theme Integration docs](https://github.com/PrivOS-AI/privos-dev-docs/blob/main/mcp-app-platform/developer-guide.md#7-theme-sync-lightdark-mode).
 
 ## License
 

@@ -13,7 +13,7 @@ app.get('/.well-known/mcp/manifest.json', (_req, res) => {
     name: '{{APP_ID}}',
     version: '1.0.0',
     title: '{{APP_NAME}}',
-    description: 'A Privos MCP mini app',
+    description: 'A Privos MCP app',
     author: 'Developer',
   });
 });

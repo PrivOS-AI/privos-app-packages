@@ -1,7 +1,7 @@
 {
   "name": "create-privos-mcp-app",
   "version": "0.1.0",
-  "description": "CLI scaffolder for Privos MCP mini apps",
+  "description": "CLI scaffolder for Privos MCP apps",
   "bin": {
     "create-privos-mcp-app": "./src/index.ts"
   },
