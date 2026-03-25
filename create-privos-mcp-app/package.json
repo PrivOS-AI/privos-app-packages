@@ -1,0 +1,16 @@
+{
+  "name": "create-privos-mcp-app",
+  "version": "0.1.0",
+  "description": "CLI scaffolder for Privos MCP mini apps",
+  "bin": {
+    "create-privos-mcp-app": "./src/index.ts"
+  },
+  "main": "src/index.ts",
+  "scripts": {
+    "build": "tsc"
+  },
+  "dependencies": {
+    "fs-extra": "^11.0.0"
+  },
+  "license": "MIT"
+}
