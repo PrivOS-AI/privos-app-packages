@@ -5,11 +5,42 @@
 import { createContext, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 
+/** Params for a REST passthrough call (gated server-side by the app's granted scopes). */
+export interface RestRequestParams {
+	method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+	/** Hub REST path after /api/v1/, e.g. 'file-management.files.channel/' + roomId */
+	path: string;
+	query?: Record<string, string | number | boolean>;
+	body?: any;
+}
+
+/** Result of a REST passthrough: downstream HTTP status + parsed JSON body. */
+export interface RestResponse<T = any> {
+	statusCode: number;
+	body: T;
+}
+
+/** Params for a multipart file upload to file management (requires files:write). */
+export interface UploadFileParams {
+	channelId: string;
+	fileName: string;
+	/** Base64-encoded file content (data URI accepted). */
+	base64Data: string;
+	mimeType?: string;
+	folderId?: string;
+	enableEmbedding?: boolean;
+	duplicateAction?: 'replace' | 'keep_both' | 'cancel';
+}
+
 /** Minimal MCP App interface (mirrors @modelcontextprotocol/ext-apps App class) */
 export interface McpApp {
 	connect(): Promise<void>;
 	disconnect(): void;
 	callServerTool(params: { name: string; arguments: Record<string, any> }): Promise<any>;
+	/** Call an existing hub REST endpoint as the current user (preferred over resource tools). */
+	rest(params: RestRequestParams): Promise<RestResponse>;
+	/** Upload a file to file management as the current user. */
+	uploadFile(params: UploadFileParams): Promise<any>;
 	onhostcontextchanged?: (ctx: any) => void;
 }
 
@@ -48,6 +79,21 @@ function createDefaultApp(): McpApp {
 		}
 	};
 
+	// Generic JSON-RPC request to the host bridge over postMessage.
+	const sendRequest = (method: string, params: any, timeoutMs = 10000): Promise<any> => {
+		const id = nextId++;
+		return new Promise((resolve, reject) => {
+			pendingCalls.set(id, { resolve, reject });
+			window.parent.postMessage({ jsonrpc: '2.0', id, method, params }, '*');
+			setTimeout(() => {
+				if (pendingCalls.has(id)) {
+					pendingCalls.delete(id);
+					reject(new Error(`${method} timeout`));
+				}
+			}, timeoutMs);
+		});
+	};
+
 	return {
 		async connect() {
 			if (connected) return;
@@ -58,18 +104,15 @@ function createDefaultApp(): McpApp {
 			window.removeEventListener('message', handleMessage);
 			connected = false;
 		},
-		async callServerTool(params) {
-			const id = nextId++;
-			return new Promise((resolve, reject) => {
-				pendingCalls.set(id, { resolve, reject });
-				window.parent.postMessage({ jsonrpc: '2.0', id, method: 'tools/call', params }, '*');
-				setTimeout(() => {
-					if (pendingCalls.has(id)) {
-						pendingCalls.delete(id);
-						reject(new Error('Tool call timeout'));
-					}
-				}, 10000);
-			});
+		callServerTool(params) {
+			return sendRequest('tools/call', params);
+		},
+		rest(params) {
+			return sendRequest('host/rest.request', params);
+		},
+		uploadFile(params) {
+			// Larger timeout — uploads can take a while.
+			return sendRequest('host/file.upload', params, 60000);
 		},
 		set onhostcontextchanged(handler: ((ctx: any) => void) | undefined) {
 			contextHandler = handler;

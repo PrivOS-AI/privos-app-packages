@@ -3,6 +3,7 @@
  * Wraps the standard @modelcontextprotocol/ext-apps SDK with Privos convenience hooks.
  */
 export { PrivosAppProvider, PrivosAppContext } from './PrivosAppProvider';
+export type { McpApp, RestRequestParams, RestResponse, UploadFileParams } from './PrivosAppProvider';
 export { usePrivosApp } from './use-privos-app';
 export { usePrivosContext } from './use-privos-context';
 export { usePrivosTool } from './use-privos-tool';
