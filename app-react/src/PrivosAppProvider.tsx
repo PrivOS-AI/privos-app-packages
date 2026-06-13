@@ -12,6 +12,9 @@ export interface RestRequestParams {
 	path: string;
 	query?: Record<string, string | number | boolean>;
 	body?: any;
+	/** Override the host-bridge response timeout (ms). Default 10000. Raise for slow
+	 *  downstreams (e.g. a cold Sandbox VM spawn behind agents.sandbox.generate-async). */
+	timeoutMs?: number;
 }
 
 /** Result of a REST passthrough: downstream HTTP status + parsed JSON body. */
@@ -108,7 +111,7 @@ function createDefaultApp(): McpApp {
 			return sendRequest('tools/call', params);
 		},
 		rest(params) {
-			return sendRequest('host/rest.request', params);
+			return sendRequest('host/rest.request', params, params.timeoutMs ?? 10000);
 		},
 		uploadFile(params) {
 			// Larger timeout — uploads can take a while.
