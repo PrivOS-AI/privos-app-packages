@@ -47,6 +47,24 @@ export interface McpApp {
 	onhostcontextchanged?: (ctx: any) => void;
 }
 
+/**
+ * Host context pushed by the hub to the app iframe on every context change.
+ * `userToken` is a short-lived RS256 JWT signed by the hub private key.
+ * It lets the app's OWN backend cryptographically verify who triggered a request
+ * without trusting any client-supplied userId (which is forgeable).
+ */
+export interface PrivosHostContext {
+	userId?: string;
+	username?: string;
+	theme?: string;
+	roomId?: string;
+	/** Short-lived RS256 JWT. Claims: sub=userId, aud=appId, preferred_username, rid?, exp (~5 min).
+	 *  Forward this in `Authorization: Bearer <token>` when calling your app's own backend.
+	 *  Verify via the hub JWKS at `<hubBaseUrl>/.well-known/mcp-apps/jwks.json`. */
+	userToken?: string;
+	[key: string]: unknown;
+}
+
 export const PrivosAppContext = createContext<McpApp | null>(null);
 
 interface PrivosAppProviderProps {
@@ -65,6 +83,10 @@ function createDefaultApp(): McpApp {
 	let contextHandler: ((ctx: any) => void) | undefined;
 
 	const handleMessage = (event: MessageEvent) => {
+			// Only trust the host bridge (parent frame). Rejecting other sources stops a
+			// sibling/nested frame from forging context/tool responses or injecting a token.
+			if (event.source !== window.parent) return;
+
 		const data = event.data;
 		if (!data || data.jsonrpc !== '2.0') return;
 

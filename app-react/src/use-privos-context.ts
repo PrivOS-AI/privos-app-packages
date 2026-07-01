@@ -14,6 +14,11 @@ export interface PrivosContext {
 	roomId: string;
 	roomName: string;
 	userRoles: string[];
+	/** Short-lived RS256 JWT issued by the hub to cryptographically identify the current user.
+	 *  Forward to your app backend as `Authorization: Bearer <userToken>` and verify via JWKS.
+	 *  See `usePrivosUserToken()` for a convenience accessor and the template `server.ts` for
+	 *  the recommended backend verification pattern. */
+	userToken?: string;
 }
 
 const defaultContext: PrivosContext = {
@@ -23,6 +28,7 @@ const defaultContext: PrivosContext = {
 	roomId: '',
 	roomName: '',
 	userRoles: [],
+	userToken: undefined,
 };
 
 export function usePrivosContext(): PrivosContext {

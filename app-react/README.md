@@ -48,11 +48,73 @@ export default function App() {
 | Hook | Returns | Description |
 |------|---------|-------------|
 | `usePrivosApp()` | `McpApp` | MCP app instance for `callServerTool()` |
-| `usePrivosContext()` | `PrivosContext` | `{ userId, username, roomId, roomName, theme, userRoles }` |
+| `usePrivosContext()` | `PrivosContext` | `{ userId, username, roomId, roomName, theme, userRoles, userToken? }` |
+| `usePrivosUserToken()` | `string \| undefined` | Signed identity JWT for forwarding to your backend |
 | `usePrivosTool(name, args)` | `{ data, loading, error, refetch }` | Auto-fetching tool call (for reads) |
 | `useLists(roomId)` | `{ data, loading, error }` | Lists in room |
 | `useFiles(roomId)` | `{ data, loading, error }` | Files in room |
 | `useRoom(roomId?)` | `{ data, loading, error }` | Room metadata |
+
+## User Identity (Verified)
+
+The hub delivers a signed RS256 JWT to the app iframe on every context update. This token lets your app's **own backend** cryptographically verify which user triggered a request — without trusting any client-supplied value.
+
+### Frontend: forward the token
+
+```tsx
+import { usePrivosUserToken } from '@privos/app-react';
+
+function MyComponent() {
+  const token = usePrivosUserToken();
+
+  async function fetchMyData() {
+    // Forward the hub-signed token; backend verifies it before trusting userId
+    const res = await fetch('/api/my-data', {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    return res.json();
+  }
+
+  // ...
+}
+```
+
+### Backend: verify before trusting
+
+Use the `verifyPrivosUser` helper generated in your app's `server.ts` (powered by `jose`):
+
+```ts
+import { verifyPrivosUser } from './server'; // generated helper
+
+app.get('/api/my-data', async (req, res) => {
+  const user = await verifyPrivosUser(req.headers.authorization);
+  // user.userId is now cryptographically verified — safe to use for authz
+  res.json({ data: await getDataForUser(user.userId) });
+});
+```
+
+Or use the generated `requirePrivosUser` Express middleware:
+
+```ts
+app.get('/api/my-data', requirePrivosUser, (req, res) => {
+  res.json({ data: await getDataForUser(req.privosUser!.userId) });
+});
+```
+
+**Without backend verification, never trust a userId from the request body or query string — those values are client-controlled and forgeable.**
+
+### Token properties
+
+| Claim | Value |
+|-------|-------|
+| `sub` | Stable opaque userId — use as your user key |
+| `preferred_username` | Human-readable username — display only |
+| `aud` | This app's `appId` — token is bound to one app, cannot be replayed elsewhere |
+| `rid` | RoomId (optional, present when app is in a room tab) |
+| `exp` | ~5 minutes from issue — short window limits replay risk |
+| `iss` | Hub base URL |
+
+Tokens are re-issued automatically on every `HOST_CONTEXT_CHANGED` event (theme change, room navigation, etc.). The hub publishes its public keys at `<hubBaseUrl>/.well-known/mcp-apps/jwks.json`; `jose` caches and rotates them automatically.
 
 ## Provider
 
