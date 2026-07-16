@@ -39,7 +39,12 @@ export interface UploadFileParams {
 export interface McpApp {
 	connect(): Promise<void>;
 	disconnect(): void;
-	callServerTool(params: { name: string; arguments: Record<string, any> }): Promise<any>;
+	callServerTool(params: {
+		name: string;
+		arguments: Record<string, any>;
+		/** Override host-bridge response timeout (ms). */
+		timeoutMs?: number;
+	}): Promise<any>;
 	/** Call an existing hub REST endpoint as the current user (preferred over resource tools). */
 	rest(params: RestRequestParams): Promise<RestResponse>;
 	/** Upload a file to file management as the current user. */
@@ -118,6 +123,18 @@ function createDefaultApp(): McpApp {
 	let connected = false;
 	const pendingCalls = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
 	let nextId = 1;
+	// ---------------------------------------------------------------------------
+	// SERIAL tools/call queue (comparison / workaround path — keep commented)
+	//
+	// Hub relay previously reused JSON-RPC id `1` for concurrent tools/call to the
+	// app WebSocket. Parallel calls then raced (wrong waiter resolved / orphan
+	// timed out as "RPC timeout for tools/call"). Uncomment `toolsCallTail` and
+	// the queue wiring in `callServerTool` below to serialize so only one
+	// tools/call is in flight through the host at a time — useful for A/B testing
+	// against the default parallel path once the hub fix is verified.
+	//
+	// let toolsCallTail: Promise<void> = Promise.resolve();
+	// ---------------------------------------------------------------------------
 
 	const handleMessage = (event: MessageEvent) => {
 			// Only trust the host bridge (parent frame). Rejecting other sources stops a
@@ -138,6 +155,9 @@ function createDefaultApp(): McpApp {
 	};
 
 	// Generic JSON-RPC request to the host bridge over postMessage.
+	// tools/call default is above typical server-side fetch timeouts (20s) so the
+	// app can surface a real upstream error instead of a generic bridge timeout.
+	const DEFAULT_TOOLS_CALL_TIMEOUT_MS = 30_000;
 	const sendRequest = (method: string, params: any, timeoutMs = 10000): Promise<any> => {
 		const id = nextId++;
 		return new Promise((resolve, reject) => {
@@ -163,7 +183,24 @@ function createDefaultApp(): McpApp {
 			connected = false;
 		},
 		callServerTool(params) {
-			return sendRequest('tools/call', params);
+			const { timeoutMs, ...rpcParams } = params;
+			const run = () =>
+				sendRequest(
+					'tools/call',
+					{ name: rpcParams.name, arguments: rpcParams.arguments ?? {} },
+					timeoutMs ?? DEFAULT_TOOLS_CALL_TIMEOUT_MS,
+				);
+			// Default: parallel tools/call (unique bridge ids via nextId).
+			return run();
+			// --- SERIAL comparison path ---
+			// Comment out `return run()` above, uncomment `toolsCallTail` near
+			// createDefaultApp, then uncomment:
+			// const result = toolsCallTail.then(run, run);
+			// toolsCallTail = result.then(
+			// 	() => undefined,
+			// 	() => undefined,
+			// );
+			// return result;
 		},
 		rest(params) {
 			return sendRequest('host/rest.request', params, params.timeoutMs ?? 10000);
