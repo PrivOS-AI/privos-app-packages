@@ -1,0 +1,60 @@
+{
+  "name": "@privos/app-server",
+  "version": "0.1.0",
+  "description": "Business-agnostic PrivOS MCP App server runtime — Direct HTTP + Relay WebSocket",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./auth": {
+      "types": "./dist/auth/user-token.d.ts",
+      "import": "./dist/auth/user-token.js"
+    },
+    "./direct": {
+      "types": "./dist/direct/express-router.d.ts",
+      "import": "./dist/direct/express-router.js"
+    },
+    "./direct/http-ingress": {
+      "types": "./dist/direct/http-ingress.d.ts",
+      "import": "./dist/direct/http-ingress.js"
+    },
+    "./relay": {
+      "types": "./dist/relay/relay-client.d.ts",
+      "import": "./dist/relay/relay-client.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepack": "npm run build",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "pack:check": "npm pack --dry-run"
+  },
+  "peerDependencies": {
+    "express": "^4.18.0 || ^5.0.0"
+  },
+  "dependencies": {
+    "jose": "^5.9.6",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.25",
+    "@types/node": "^22.10.0",
+    "@types/supertest": "^7.2.0",
+    "@types/ws": "^8.18.1",
+    "express": "^4.22.2",
+    "supertest": "^7.2.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.10"
+  },
+  "license": "MIT"
+}
