@@ -57,6 +57,7 @@ describe('relayCallerAuthSurface', () => {
 describe('connectRelay', () => {
 	it('fetches oauth token, answers tools/list, ignores notifications', async () => {
 		FakeWebSocket.instances = [];
+		const logs: Array<{ event: string; fields: Record<string, unknown> }> = [];
 		const fetchImpl = vi.fn(async () => ({
 			ok: true,
 			json: async () => ({ access_token: 'tok' }),
@@ -71,6 +72,7 @@ describe('connectRelay', () => {
 				if (req.method === 'tools/list') return { tools: [{ name: 'demo.ping' }] };
 				throw Object.assign(new Error('unexpected'), { code: -32601 });
 			},
+			logger: (event, fields) => logs.push({ event, fields }),
 			fetchImpl: fetchImpl as unknown as typeof fetch,
 			WebSocketImpl: FakeWebSocket as unknown as typeof import('ws').default,
 		});
@@ -88,6 +90,25 @@ describe('connectRelay', () => {
 			id: 'x',
 			result: { tools: [{ name: 'demo.ping' }] },
 		});
+		expect(logs).toContainEqual({
+			event: 'relay.rpc.inbound',
+			fields: {
+				direction: '←',
+				generation: 1,
+				requestId: 'x',
+				method: 'tools/list',
+			},
+		});
+		expect(logs).toContainEqual({
+			event: 'relay.rpc.outbound',
+			fields: {
+				direction: '→',
+				generation: 1,
+				requestId: 'x',
+				method: 'tools/list',
+				responseKind: 'result',
+			},
+		});
 
 		ws.emit(
 			'message',
@@ -97,6 +118,15 @@ describe('connectRelay', () => {
 		);
 		await new Promise((r) => setTimeout(r, 20));
 		expect(ws.sent.length).toBe(1);
+		expect(logs).toContainEqual({
+			event: 'relay.rpc.inbound',
+			fields: {
+				direction: '←',
+				generation: 1,
+				requestId: 99,
+				method: 'notifications/initialized',
+			},
+		});
 
 		await handle.stop();
 	});

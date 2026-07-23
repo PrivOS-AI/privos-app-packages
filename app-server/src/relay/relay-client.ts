@@ -411,7 +411,11 @@ export function connectRelay(opts: RelayClientOptions): RelayHandle {
 		}
 	}
 
-	function safeSend(ws: WebSocket, payload: unknown): void {
+	function safeSend(
+		ws: WebSocket,
+		payload: unknown,
+		rpcFields: { generation?: number; method?: string; toolName?: string } = {},
+	): void {
 		if (ws.readyState !== WebSocketImpl.OPEN) return;
 		if (typeof ws.bufferedAmount === 'number' && ws.bufferedAmount > maxBufferedBytes) {
 			log('relay.backpressure', {
@@ -428,6 +432,24 @@ export function connectRelay(opts: RelayClientOptions): RelayHandle {
 			return;
 		}
 		try {
+			const payloadObject =
+				payload && typeof payload === 'object' && !Array.isArray(payload)
+					? (payload as Record<string, unknown>)
+					: undefined;
+			const responseId =
+				payloadObject &&
+				Object.prototype.hasOwnProperty.call(payloadObject, 'id') &&
+				(typeof payloadObject.id === 'string' ||
+					typeof payloadObject.id === 'number' ||
+					payloadObject.id === null)
+					? (payloadObject.id as string | number | null)
+					: undefined;
+			log('relay.rpc.outbound', {
+				direction: '→',
+				...rpcFields,
+				...(responseId !== undefined ? { requestId: responseId } : {}),
+				responseKind: payloadObject && 'error' in payloadObject ? 'error' : 'result',
+			});
 			ws.send(text, (err) => {
 				if (err) {
 					log('relay.send_error', { reason: 'send_callback_error', name: err.name });
@@ -470,7 +492,9 @@ export function connectRelay(opts: RelayClientOptions): RelayHandle {
 		try {
 			parsedJson = JSON.parse(text);
 		} catch {
-			safeSend(ws, errorResponse(null, jsonRpcError(PARSE_ERROR, 'Parse error')));
+			safeSend(ws, errorResponse(null, jsonRpcError(PARSE_ERROR, 'Parse error')), {
+				generation,
+			});
 			return;
 		}
 
@@ -490,6 +514,20 @@ export function connectRelay(opts: RelayClientOptions): RelayHandle {
 			(typeof msgObj.id === 'string' || typeof msgObj.id === 'number' || msgObj.id === null)
 				? (msgObj.id as string | number | null)
 				: undefined;
+		const method = typeof msgObj.method === 'string' ? msgObj.method : undefined;
+		const params =
+			msgObj.params && typeof msgObj.params === 'object' && !Array.isArray(msgObj.params)
+				? (msgObj.params as Record<string, unknown>)
+				: undefined;
+		const toolName =
+			method === 'tools/call' && typeof params?.name === 'string' ? params.name : undefined;
+		log('relay.rpc.inbound', {
+			direction: '←',
+			generation,
+			...(requestId !== undefined ? { requestId } : { notification: true }),
+			...(method ? { method } : {}),
+			...(toolName ? { toolName } : {}),
+		});
 
 		const context = await runtime.buildContext({
 			transport: 'relay',
@@ -504,7 +542,7 @@ export function connectRelay(opts: RelayClientOptions): RelayHandle {
 			return;
 		}
 
-		safeSend(ws, outcome.response);
+		safeSend(ws, outcome.response, { generation, method, toolName });
 	}
 
 	void openConnection().catch((err) => {
