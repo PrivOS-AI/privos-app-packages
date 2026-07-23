@@ -48,8 +48,9 @@ export default function App() {
 | Hook | Returns | Description |
 |------|---------|-------------|
 | `usePrivosApp()` | `McpApp` | MCP app instance for `callServerTool()` |
-| `usePrivosContext()` | `PrivosContext` | `{ userId, username, roomId, roomName, theme, userRoles, userToken? }` |
+| `usePrivosContext()` | `PrivosContext` | `{ userId, username, roomId, roomName, theme, userRoles, userToken?, userTokenGeneration, refreshUserToken }` — fetches `mcpapp.context.get`, merges `HOST_CONTEXT_CHANGED`, and proactively refreshes short-lived Hub JWTs before `exp` |
 | `usePrivosUserToken()` | `string \| undefined` | Signed identity JWT for forwarding to your backend |
+| `useUserTokenRefreshEffects(opts)` | `void` | Advanced: exp-timer + visibility/focus triggers for custom HOST context providers (do not combine with `usePrivosContext` in the same iframe) |
 | `usePrivosTool(name, args)` | `{ data, loading, error, refetch }` | Auto-fetching tool call (for reads) |
 | `useLists(roomId)` | `{ data, loading, error }` | Lists in room |
 | `useFiles(roomId)` | `{ data, loading, error }` | Files in room |
@@ -114,7 +115,17 @@ app.get('/api/my-data', requirePrivosUser, (req, res) => {
 | `exp` | ~5 minutes from issue — short window limits replay risk |
 | `iss` | Hub base URL |
 
-Tokens are re-issued automatically on every `HOST_CONTEXT_CHANGED` event (theme change, room navigation, etc.). The hub publishes its public keys at `<hubBaseUrl>/.well-known/mcp-apps/jwks.json`; `jose` caches and rotates them automatically.
+Tokens are re-issued on `HOST_CONTEXT_CHANGED` and also proactively re-fetched via `mcpapp.context.get` shortly before JWT `exp` (and when the tab becomes visible again). Use `refreshUserToken()` / `userTokenGeneration` from `usePrivosContext()` if your UI needs to recover from `IDENTITY_INVALID` or clear identity banners after a fresher token lands.
+
+The hub publishes its public keys at `<hubBaseUrl>/.well-known/mcp-apps/jwks.json`; `jose` caches and rotates them automatically.
+
+### Helpers (also exported)
+
+| Export | Use |
+|--------|-----|
+| `parseToolResult` | Parse MCP tool / host-bridge payloads (`isError`, `content[0].text`, nested `result`) |
+| `isFresherUserToken` / `msUntilUserTokenRefresh` / … | Client-side JWT `exp` scheduling (not verification) |
+| `isIdentityTokenErrorMessage` / `toolResultLooksIdentityInvalid` | Detect identity-invalid tool errors for retry / banners |
 
 ## Provider
 
