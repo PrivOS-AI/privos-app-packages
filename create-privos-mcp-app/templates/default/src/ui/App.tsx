@@ -1,7 +1,7 @@
 /**
  * Main React app component for the MCP app UI.
  */
-import { PrivosAppProvider, usePrivosContext, useLists } from '@privos/app-react';
+import { PrivosAppProvider, usePrivosContext, useLists } from '@privos_ai/app-react';
 
 function Dashboard() {
   const ctx = usePrivosContext();

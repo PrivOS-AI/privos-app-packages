@@ -36,10 +36,10 @@ The Express server handles:
 
 ## Generated UI
 
-Uses `@privos/app-react` hooks:
+Uses `@privos_ai/app-react` hooks:
 
 ```tsx
-import { PrivosAppProvider, usePrivosContext, useLists } from '@privos/app-react';
+import { PrivosAppProvider, usePrivosContext, useLists } from '@privos_ai/app-react';
 ```
 
 ## Register in Privos

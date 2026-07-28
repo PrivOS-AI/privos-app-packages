@@ -1,17 +1,17 @@
-# @privos/app-react
+# @privos_ai/app-react
 
 React hooks for building apps on the [Privos](https://privos.ai) platform. Thin wrapper around MCP Apps protocol PostMessage transport.
 
 ## Install
 
 ```bash
-npm install @privos/app-react
+npm install @privos_ai/app-react
 ```
 
 ## Usage
 
 ```tsx
-import { PrivosAppProvider, usePrivosContext, useLists, usePrivosApp } from '@privos/app-react';
+import { PrivosAppProvider, usePrivosContext, useLists, usePrivosApp } from '@privos_ai/app-react';
 
 function MyApp() {
   const { roomId, userId, theme } = usePrivosContext();
@@ -62,7 +62,7 @@ The hub delivers a signed RS256 JWT to the app iframe on every context update. T
 ### Frontend: forward the token
 
 ```tsx
-import { usePrivosUserToken } from '@privos/app-react';
+import { usePrivosUserToken } from '@privos_ai/app-react';
 
 function MyComponent() {
   const token = usePrivosUserToken();

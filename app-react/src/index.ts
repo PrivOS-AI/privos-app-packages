@@ -1,5 +1,5 @@
 /**
- * @privos/app-react — thin React wrappers for Privos MCP app development.
+ * @privos_ai/app-react — thin React wrappers for Privos MCP app development.
  * Wraps the standard @modelcontextprotocol/ext-apps SDK with Privos convenience hooks.
  */
 export { PrivosAppProvider, PrivosAppContext } from './PrivosAppProvider';

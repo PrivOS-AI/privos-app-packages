@@ -6,7 +6,7 @@ Packages for building apps on the [PrivOS](https://privos.ai) platform.
 
 | Package | Description |
 |---------|-------------|
-| [`@privos/app-react`](./app-react/) | React hooks for Privos MCP apps — `usePrivosContext`, `usePrivosTool`, `useLists`, etc. |
+| [`@privos_ai/app-react`](./app-react/) | React hooks for Privos MCP apps — `usePrivosContext`, `usePrivosTool`, `useLists`, etc. |
 | [`create-privos-mcp-app`](./create-privos-mcp-app/) | CLI scaffolder — `npx create-privos-mcp-app my-app` |
 
 ## Quick Start
