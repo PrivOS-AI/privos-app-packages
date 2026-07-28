@@ -1,0 +1,56 @@
+name: app-server
+
+on:
+  push:
+    paths:
+      - 'app-server/**'
+      - 'create-privos-mcp-app/templates/**'
+      - '.github/workflows/app-server.yml'
+  pull_request:
+    paths:
+      - 'app-server/**'
+      - 'create-privos-mcp-app/templates/**'
+      - '.github/workflows/app-server.yml'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app-server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: app-server/package-lock.json
+      - name: Install
+        run: npm install
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Unit tests (mock Hub only)
+        run: npm test
+      - name: Build dist
+        run: npm run build
+      - name: Pack and verify Node can import published layout
+        run: |
+          set -euo pipefail
+          TARBALL=$(npm pack --silent)
+          TMP=$(mktemp -d)
+          mkdir -p "$TMP/pkg"
+          tar -xzf "$TARBALL" -C "$TMP/pkg" --strip-components=1
+          test -f "$TMP/pkg/dist/index.js"
+          test ! -d "$TMP/pkg/src"
+          test ! -d "$TMP/pkg/test"
+          cd "$TMP"
+          npm init -y >/dev/null
+          npm install "$OLDPWD/$TARBALL" express --silent
+          node --input-type=module -e "import('@privos_ai/app-server').then(m => { if (!m.createDirectRouter || !m.connectRelay) process.exit(1); console.log('import-ok'); })"
+          rm -f "$OLDPWD/$TARBALL"
+      - name: Install minimal example against built package
+        run: npm install
+        working-directory: app-server/examples/minimal-mcp-app
+      - name: Typecheck minimal example
+        run: npm run typecheck
+        working-directory: app-server/examples/minimal-mcp-app

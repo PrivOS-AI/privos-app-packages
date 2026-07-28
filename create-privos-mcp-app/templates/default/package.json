@@ -9,8 +9,8 @@
     "build": "vite build && tsc -p tsconfig.server.json"
   },
   "dependencies": {
-    "express": "^4.18.0",
-    "jose": "^5.0.0"
+    "@privos_ai/app-server": "^0.1.0",
+    "express": "^4.18.0"
   },
   "devDependencies": {
     "@privos_ai/app-react": "^0.1.0",

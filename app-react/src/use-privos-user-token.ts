@@ -3,7 +3,9 @@
  *
  * The hub mints a short-lived RS256 JWT and pushes it to the iframe on every
  * HOST_CONTEXT_CHANGED event. Tokens are scoped to a single app (aud=appId) and
- * expire after ~5 minutes, so they cannot be replayed to other apps or stale sessions.
+ * expire after ~5 minutes. `usePrivosContext()` also proactively re-fetches via
+ * `mcpapp.context.get` before `exp` and exposes `refreshUserToken` /
+ * `userTokenGeneration` for IDENTITY_INVALID recovery.
  *
  * Usage — forward the token when calling your app's own backend:
  *

@@ -36,6 +36,8 @@
   },
   "scripts": {
     "build": "tsup",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "prepublishOnly": "npm run build"
   },
@@ -43,10 +45,16 @@
     "react": ">=18.0.0"
   },
   "devDependencies": {
+    "@testing-library/react": "^16.3.0",
+    "@types/node": "^22.10.0",
     "@types/react": "^18.3.31",
+    "@types/react-dom": "^18.3.7",
+    "jsdom": "^26.1.0",
     "react": "^18.3.1",
+    "react-dom": "^18.3.1",
     "tsup": "^8.5.1",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.10"
   },
   "engines": {
     "node": ">=18.0.0"
