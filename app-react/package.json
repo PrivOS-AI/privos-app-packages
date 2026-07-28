@@ -2,17 +2,53 @@
   "name": "@privos_ai/app-react",
   "version": "0.1.0",
   "description": "React helpers for building Privos MCP apps",
-  "main": "src/index.ts",
-  "types": "src/index.ts",
+  "license": "MIT",
+  "author": "PrivOS",
+  "keywords": [
+    "privos",
+    "mcp",
+    "react",
+    "hooks"
+  ],
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
-    "build": "tsc"
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
   },
   "peerDependencies": {
     "react": ">=18.0.0"
   },
-  "license": "MIT",
   "devDependencies": {
     "@types/react": "^18.3.31",
+    "react": "^18.3.1",
+    "tsup": "^8.5.1",
     "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
