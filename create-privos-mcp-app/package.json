@@ -2,15 +2,37 @@
   "name": "create-privos-mcp-app",
   "version": "0.1.0",
   "description": "CLI scaffolder for Privos MCP apps",
+  "license": "MIT",
+  "author": "PrivOS",
+  "keywords": [
+    "privos",
+    "mcp",
+    "cli",
+    "scaffold",
+    "create"
+  ],
   "bin": {
-    "create-privos-mcp-app": "./src/index.ts"
+    "create-privos-mcp-app": "dist/index.js"
   },
-  "main": "src/index.ts",
+  "main": "dist/index.js",
+  "files": [
+    "dist",
+    "templates",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
-    "build": "tsc"
+    "build": "tsup",
+    "prepublishOnly": "npm run build"
   },
-  "dependencies": {
-    "fs-extra": "^11.0.0"
+  "devDependencies": {
+    "tsup": "^8.0.0",
+    "typescript": "^5.9.3"
   },
-  "license": "MIT"
+  "engines": {
+    "node": ">=18.0.0"
+  }
 }
