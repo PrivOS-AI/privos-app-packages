@@ -27,6 +27,9 @@ function copyDir(src: string, dest: string, appName: string): void {
 }
 
 export async function scaffoldApp(appName: string): Promise<void> {
+	if (!/^[a-z0-9][a-z0-9-]{1,62}$/.test(appName)) {
+		throw new Error('App name must be 2-63 lowercase letters, numbers or hyphens, starting with a letter or number');
+	}
 	const targetDir = path.resolve(process.cwd(), appName);
 
 	if (fs.existsSync(targetDir)) {

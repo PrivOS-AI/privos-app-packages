@@ -13,6 +13,8 @@
  */
 import express from 'express';
 import type { Request, Response, NextFunction } from 'express';
+import { readFileSync } from 'fs';
+import path from 'path';
 import {
 	createDirectRouter,
 	verifyPrivosUser,
@@ -24,7 +26,19 @@ import {
 } from '@privos_ai/app-server';
 
 const PRIVOS_HUB_URL = process.env.PRIVOS_HUB_URL || 'https://your-hub.example.com';
-const APP_ID = '{{APP_ID}}'; // set by scaffolder; used to validate `aud` claim
+const publisherManifest = JSON.parse(
+	readFileSync(path.resolve(process.cwd(), 'privos-app.json'), 'utf8'),
+) as {
+	name: string;
+	version: string;
+	title: string;
+	description: string;
+	author: { name: string; email?: string; website?: string };
+	scopes: string[];
+	tools: Array<Record<string, unknown> & { ui?: Record<string, unknown> }>;
+	port: number;
+};
+const APP_ID = publisherManifest.name;
 
 const authOptions: AuthOptions = {
 	jwksUrl: `${PRIVOS_HUB_URL}/.well-known/mcp-apps/jwks.json`,
@@ -62,24 +76,24 @@ declare global {
 
 const descriptor: AppDescriptor = {
 	id: APP_ID,
-	name: '{{APP_NAME}}',
-	version: '1.0.0',
-	title: '{{APP_NAME}}',
-	description: 'A Privos MCP app',
+	name: publisherManifest.title,
+	version: publisherManifest.version,
+	title: publisherManifest.title,
+	description: publisherManifest.description,
+	author: publisherManifest.author,
+	scopes: publisherManifest.scopes,
 };
 
 async function mcpHandler(request: ApplicationMcpRequest, _ctx: ToolCallContext) {
 	if (request.method === 'tools/list') {
 		return {
-			tools: [
-				{
-					name: '{{APP_NAME}}_dashboard',
-					title: '{{APP_NAME}} Dashboard',
-					description: 'Main dashboard view',
-					inputSchema: { type: 'object', properties: { roomId: { type: 'string' } } },
-					_meta: { ui: { resourceUri: 'ui://{{APP_NAME}}/dashboard.html' } },
-				},
-			],
+			tools: publisherManifest.tools.map((declaredTool) => {
+				const { ui, ...tool } = declaredTool;
+				return {
+					...tool,
+					...(ui ? { _meta: { ui } } : {}),
+				};
+			}),
 		};
 	}
 
@@ -88,6 +102,12 @@ async function mcpHandler(request: ApplicationMcpRequest, _ctx: ToolCallContext)
 
 const app = express();
 app.use(express.json());
+app.use(express.static(path.resolve(process.cwd(), 'dist')));
+
+// The runtime exposes the exact reviewed Publisher manifest.
+app.get('/.well-known/mcp/manifest.json', (_req, res) => {
+	res.json(publisherManifest);
+});
 
 app.use(
 	createDirectRouter({
@@ -96,7 +116,9 @@ app.use(
 		auth: authOptions,
 		ui: {
 			uri: 'ui://{{APP_NAME}}/dashboard.html',
-			renderHtml: async () => `<!DOCTYPE html>
+			renderHtml: async () => process.env.NODE_ENV === 'production'
+				? readFileSync(path.resolve(process.cwd(), 'dist/index.html'), 'utf8')
+				: `<!DOCTYPE html>
 <html><head><title>{{APP_NAME}}</title><style>html,body{margin:0}</style></head>
 <body><div id="root"></div>
 <script type="module" src="http://localhost:5173/src/ui/main.tsx"></script>
@@ -109,7 +131,20 @@ app.get('/api/me', requirePrivosUser, (req, res) => {
 	res.json({ user: req.privosUser });
 });
 
-const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => {
+const PORT = Number(process.env.PORT || publisherManifest.port || 3001);
+const server = app.listen(PORT, () => {
 	console.log(`MCP app listening on http://localhost:${PORT}`);
 });
+
+function shutdown(signal: string): void {
+	console.log(`Received ${signal}; shutting down`);
+	server.close((error) => {
+		if (error) {
+			console.error('Failed to close MCP app server', error);
+			process.exitCode = 1;
+		}
+	});
+}
+
+process.once('SIGTERM', () => shutdown('SIGTERM'));
+process.once('SIGINT', () => shutdown('SIGINT'));

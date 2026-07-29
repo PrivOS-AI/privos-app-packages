@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "kind": "mcp-app",
+  "name": "{{APP_ID}}",
+  "version": "1.0.0",
+  "title": "{{APP_NAME}}",
+  "description": "A Privos MCP app",
+  "author": {
+    "name": "Developer"
+  },
+  "scopes": [],
+  "tools": [
+    {
+      "name": "{{APP_NAME}}_dashboard",
+      "title": "{{APP_NAME}} Dashboard",
+      "description": "Main dashboard view",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "roomId": {
+            "type": "string"
+          }
+        }
+      },
+      "ui": {
+        "resourceUri": "ui://{{APP_NAME}}/dashboard.html"
+      }
+    }
+  ],
+  "port": 3001,
+  "resources": {
+    "memoryMb": 512,
+    "cpus": 0.5,
+    "tmpSizeMb": 64
+  },
+  "volumes": [],
+  "stateless": true,
+  "license": {
+    "tiers": [
+      {
+        "id": "default",
+        "name": "Free",
+        "features": []
+      }
+    ]
+  }
+}
