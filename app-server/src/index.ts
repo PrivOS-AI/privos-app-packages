@@ -1,10 +1,17 @@
 export { MCP_PROTOCOL_VERSION, MCP_UI_MIME } from './app-descriptor.js';
-export type { AppDescriptor } from './app-descriptor.js';
+export type {
+	AppDescriptor,
+	AppPermissionDescriptor,
+	AppPermissionRequirement,
+	AppPermissionContext,
+	AppPermissionExecutionContext,
+} from './app-descriptor.js';
 export {
 	buildInitializeResult,
 	buildManifestJson,
 	buildPairingMetadata,
 	validateDescriptorCapabilities,
+	validateDescriptorPermissions,
 } from './app-descriptor.js';
 
 export type {
@@ -105,3 +112,30 @@ export type {
 	RelayHandle,
 } from './relay/relay-client.js';
 export { rawDataToText, MessageTooLargeError } from './relay/message-adapter.js';
+
+export {
+	DEFAULT_WORKLOAD_SOCKET,
+	WorkloadIdentityClient,
+	WorkloadIdentityError,
+	WorkloadPermissionDeniedError,
+	getWorkloadIdentityClient,
+} from './workload/workload-identity.js';
+export type {
+	EffectiveCapabilities,
+	WorkloadBinding,
+	WorkloadBrokerContext,
+	WorkloadBrokerResponse,
+	WorkloadFetchInit,
+	WorkloadIdentityClientOptions,
+	WorkloadIdentityErrorCode,
+} from './workload/workload-identity.js';
+export { verifyDispatchAssertion } from './workload/dispatch-assertion.js';
+export type { VerifiedDispatchActor, VerifiedDispatchAssertion } from './workload/dispatch-assertion.js';
+
+export {
+	canonicalJson,
+	canonicalJsonValue,
+	lintManifestV2,
+	sha256CanonicalJson,
+} from './manifest-tools.js';
+export type { ManifestLintResult } from './manifest-tools.js';

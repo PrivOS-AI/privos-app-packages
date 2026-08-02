@@ -48,84 +48,32 @@ export default function App() {
 | Hook | Returns | Description |
 |------|---------|-------------|
 | `usePrivosApp()` | `McpApp` | MCP app instance for `callServerTool()` |
-| `usePrivosContext()` | `PrivosContext` | `{ userId, username, roomId, roomName, theme, userRoles, userToken?, userTokenGeneration, refreshUserToken }` — fetches `mcpapp.context.get`, merges `HOST_CONTEXT_CHANGED`, and proactively refreshes short-lived Hub JWTs before `exp` |
-| `usePrivosUserToken()` | `string \| undefined` | Signed identity JWT for forwarding to your backend |
-| `useUserTokenRefreshEffects(opts)` | `void` | Advanced: exp-timer + visibility/focus triggers for custom HOST context providers (do not combine with `usePrivosContext` in the same iframe) |
+| `usePrivosContext()` | `PrivosContext` | Non-secret user/room/theme display context fetched through `mcpapp.context.get` and merged with `HOST_CONTEXT_CHANGED` |
+| `usePrivosCapability(scope)` | `{ resolved, granted, scope }` | Presentation helper for deterministic optional-feature degradation; Hub still authorizes every call |
 | `usePrivosTool(name, args)` | `{ data, loading, error, refetch }` | Auto-fetching tool call (for reads) |
 | `useLists(roomId)` | `{ data, loading, error }` | Lists in room |
 | `useFiles(roomId)` | `{ data, loading, error }` | Files in room |
 | `useRoom(roomId?)` | `{ data, loading, error }` | Room metadata |
 
-## User Identity (Verified)
+## User-delegated identity
 
-The hub delivers a signed RS256 JWT to the app iframe on every context update. This token lets your app's **own backend** cryptographically verify which user triggered a request — without trusting any client-supplied value.
+The iframe receives display context, not a bearer or user token. Calls made through
+`app.rest()`, `uploadFile()`, and `callServerTool()` remain mediated by Hub, which
+intersects the installation grant with the current user's native ACL.
 
-### Frontend: forward the token
+When Hub privately dispatches a backend tool call, it places the verified actor in
+the short-lived, body-bound Hub dispatch assertion. The app-server workload SDK
+validates that assertion before application code runs. A workload token is an app
+principal and can never be converted into a user identity.
 
-```tsx
-import { usePrivosUserToken } from '@privos_ai/app-react';
-
-function MyComponent() {
-  const token = usePrivosUserToken();
-
-  async function fetchMyData() {
-    // Forward the hub-signed token; backend verifies it before trusting userId
-    const res = await fetch('/api/my-data', {
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-    });
-    return res.json();
-  }
-
-  // ...
-}
-```
-
-### Backend: verify before trusting
-
-Use the `verifyPrivosUser` helper generated in your app's `server.ts` (powered by `jose`):
-
-```ts
-import { verifyPrivosUser } from './server'; // generated helper
-
-app.get('/api/my-data', async (req, res) => {
-  const user = await verifyPrivosUser(req.headers.authorization);
-  // user.userId is now cryptographically verified — safe to use for authz
-  res.json({ data: await getDataForUser(user.userId) });
-});
-```
-
-Or use the generated `requirePrivosUser` Express middleware:
-
-```ts
-app.get('/api/my-data', requirePrivosUser, (req, res) => {
-  res.json({ data: await getDataForUser(req.privosUser!.userId) });
-});
-```
-
-**Without backend verification, never trust a userId from the request body or query string — those values are client-controlled and forgeable.**
-
-### Token properties
-
-| Claim | Value |
-|-------|-------|
-| `sub` | Stable opaque userId — use as your user key |
-| `preferred_username` | Human-readable username — display only |
-| `aud` | This app's `appId` — token is bound to one app, cannot be replayed elsewhere |
-| `rid` | RoomId (optional, present when app is in a room tab) |
-| `exp` | ~5 minutes from issue — short window limits replay risk |
-| `iss` | Hub base URL |
-
-Tokens are re-issued on `HOST_CONTEXT_CHANGED` and also proactively re-fetched via `mcpapp.context.get` shortly before JWT `exp` (and when the tab becomes visible again). Use `refreshUserToken()` / `userTokenGeneration` from `usePrivosContext()` if your UI needs to recover from `IDENTITY_INVALID` or clear identity banners after a fresher token lands.
-
-The hub publishes its public keys at `<hubBaseUrl>/.well-known/mcp-apps/jwks.json`; `jose` caches and rotates them automatically.
+Do not accept `userId` from iframe request bodies as authorization evidence and do
+not ask the browser to forward Hub credentials to an app backend.
 
 ### Helpers (also exported)
 
 | Export | Use |
 |--------|-----|
 | `parseToolResult` | Parse MCP tool / host-bridge payloads (`isError`, `content[0].text`, nested `result`) |
-| `isFresherUserToken` / `msUntilUserTokenRefresh` / … | Client-side JWT `exp` scheduling (not verification) |
-| `isIdentityTokenErrorMessage` / `toolResultLooksIdentityInvalid` | Detect identity-invalid tool errors for retry / banners |
 
 ## Provider
 

@@ -77,6 +77,48 @@ Your handler owns `tools/list`, `tools/call`, and custom resources.
 import { verifyPrivosUser } from '@privos_ai/app-server/auth';
 ```
 
+## Secretless workload identity
+
+Production Cluster installs mount a per-installation Unix socket. The runtime creates an
+ephemeral P-256 DPoP key in memory, attests through that socket, and refreshes a short-lived,
+sender-constrained token without writing credentials to disk or environment variables.
+
+```ts
+import { getWorkloadIdentityClient } from '@privos_ai/app-server/workload';
+
+const identity = getWorkloadIdentityClient();
+const capabilities = await identity.getEffectiveCapabilities();
+const stop = identity.onCapabilitiesChanged((next) => {
+  // Disable optional features when next.scopes no longer contains their scope.
+});
+
+identity.requireCapability('basic:information');
+const response = await identity.authorizedRequest('/api/v1/mcp-apps.context', {
+  requiredScope: 'basic:information',
+});
+```
+
+`authorizedFetch` only sends authorization to the Hub origin supplied by the broker. It retries
+one 401 automatically only for safe/idempotent methods; POST/PATCH require an explicit
+`retryMode: 'idempotent'`. `authorizedRequest` maps 403 to `WorkloadPermissionDeniedError` so
+optional-feature degradation is stable. Do not convert a workload token into a user identity;
+user-delegated operations stay in the iframe host bridge.
+
+Direct production ingress should use `workloadSecurity: 'required'`; this validates the
+Hub-signed, body-bound dispatch assertion before `/mcp` reaches application code. Relay pairing
+and client credentials remain an explicit development compatibility mode only.
+
+## Manifest v2 preflight
+
+```bash
+npx privos-app-lint ./privos-app.json
+```
+
+The command rejects mixed legacy/v2 permission declarations and prints deterministic
+`canonicalManifestHash` and `publisherPermissionDeclarationHash` values. The latter covers the
+publisher declaration only; Hub/Portal compute the authoritative permission contract hash with
+the versioned server-owned catalog and immutable image digest.
+
 ## Scripts
 
 - `npm run build` — emit `dist/` (JS + `.d.ts`)

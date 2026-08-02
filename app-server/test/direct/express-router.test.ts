@@ -62,6 +62,17 @@ describe('createDirectRouter', () => {
 		const allow = res.headers['access-control-allow-headers'] ?? '';
 		expect(allow.toLowerCase()).toContain('authorization');
 		expect(allow.toLowerCase()).toContain('x-mcp-user-id');
+		expect(allow.toLowerCase()).toContain('x-privos-dispatch-assertion');
+	});
+
+	it('fails closed when workload dispatch security is required', async () => {
+		const app = express();
+		app.use(createDirectRouter({ descriptor, workloadSecurity: 'required', handler: async () => ({ tools: [] }) }));
+		const response = await request(app)
+			.post('/mcp')
+			.send({ jsonrpc: '2.0', id: 1, method: 'tools/list' })
+			.expect(403);
+		expect(response.body.error.data.code).toBe('DISPATCH_ASSERTION_INVALID');
 	});
 
 	it('returns JSON-RPC parse error for malformed JSON body', async () => {

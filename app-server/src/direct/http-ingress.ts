@@ -11,6 +11,7 @@ import express, { type Express, type Request } from 'express';
 import type { Server } from 'node:http';
 
 import { createDirectRouter, type DirectRouterOptions } from './express-router.js';
+import { getWorkloadIdentityClient } from '../workload/workload-identity.js';
 
 export type ReadinessCheckResult = {
 	ok: boolean;
@@ -158,6 +159,15 @@ export async function startHttpIngress(
 			if (options.health !== false) {
 				const healthPath = options.health?.path ?? '/health';
 				console.log(`${logPrefix}   Health:   ${boundPublicUrl}${healthPath}`);
+			}
+			const workloadClient = getWorkloadIdentityClient();
+			if (workloadClient.isAvailable() && options.workloadSecurity !== 'disabled') {
+				const bootstrapTimer = setTimeout(() => {
+					void workloadClient.ensureReady().catch(() => {
+						logger('mcp.workload_readiness_pending', { reason: 'attestation_not_yet_accepted' });
+					});
+				}, 3_000);
+				bootstrapTimer.unref();
 			}
 			resolve({
 				app,

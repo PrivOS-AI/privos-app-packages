@@ -1,10 +1,13 @@
 {
   "name": "@privos_ai/app-server",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Business-agnostic PrivOS MCP App server runtime — Direct HTTP + Relay WebSocket",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "bin": {
+    "privos-app-lint": "./dist/manifest-lint-cli.js"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -25,6 +28,14 @@
     "./relay": {
       "types": "./dist/relay/relay-client.d.ts",
       "import": "./dist/relay/relay-client.js"
+    },
+    "./workload": {
+      "types": "./dist/workload/index.d.ts",
+      "import": "./dist/workload/index.js"
+    },
+    "./manifest-tools": {
+      "types": "./dist/manifest-tools.d.ts",
+      "import": "./dist/manifest-tools.js"
     }
   },
   "files": [
@@ -41,6 +52,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit -p tsconfig.json",
+    "manifest:lint": "npm run build --silent && node dist/manifest-lint-cli.js",
     "pack:check": "npm pack --dry-run"
   },
   "peerDependencies": {

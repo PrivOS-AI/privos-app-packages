@@ -2,6 +2,21 @@ export const MCP_PROTOCOL_VERSION = '2025-03-26';
 
 export const MCP_UI_MIME = 'text/html;profile=mcp-app';
 
+export type AppPermissionRequirement = 'required' | 'optional';
+export type AppPermissionContext = 'workspace' | 'room';
+export type AppPermissionExecutionContext = 'user' | 'background' | 'both';
+
+export interface AppPermissionDescriptor {
+	scope: string;
+	requirement: AppPermissionRequirement;
+	context: AppPermissionContext;
+	executionContext: AppPermissionExecutionContext;
+	feature: string;
+	reason: string;
+	recommended?: boolean;
+	degradedBehavior?: string;
+}
+
 export interface AppDescriptor {
 	id: string;
 	name: string;
@@ -11,6 +26,8 @@ export interface AppDescriptor {
 	homepage?: string;
 	author?: { name: string; email?: string; website?: string };
 	scopes?: readonly string[];
+	/** Manifest v2 permission contract. Do not combine with legacy scopes. */
+	permissions?: readonly AppPermissionDescriptor[];
 	/** Direct manifest icon path/URL (e.g. `/public/icon.svg`). */
 	manifestIcon?: string;
 	/** Pairing / initialize icon (often a data URI for relay). */
@@ -34,6 +51,36 @@ export function validateDescriptorCapabilities(
 	}
 }
 
+export function validateDescriptorPermissions(descriptor: Pick<AppDescriptor, 'scopes' | 'permissions'>): void {
+	if (descriptor.scopes?.length && descriptor.permissions?.length) {
+		throw new Error('descriptor must not combine legacy scopes with permissions v2');
+	}
+	if (!descriptor.permissions) return;
+	if (descriptor.permissions.length === 0) throw new Error('descriptor.permissions must not be empty');
+	const seen = new Set<string>();
+	for (const permission of descriptor.permissions) {
+		if (
+			!permission ||
+			!/^[-a-z0-9]+:[-a-z0-9:]+$/.test(permission.scope) ||
+			!['required', 'optional'].includes(permission.requirement) ||
+			!['workspace', 'room'].includes(permission.context) ||
+			!['user', 'background', 'both'].includes(permission.executionContext) ||
+			!/^[-a-z0-9.]+$/.test(permission.feature) ||
+			permission.reason.trim().length < 3
+		) {
+			throw new Error(`invalid permission declaration: ${permission?.scope || 'unknown'}`);
+		}
+		if (seen.has(permission.scope)) throw new Error(`duplicate permission scope: ${permission.scope}`);
+		if (permission.requirement === 'optional' && (!permission.degradedBehavior || permission.degradedBehavior.trim().length < 10)) {
+			throw new Error(`optional permission must declare safe degraded behavior: ${permission.scope}`);
+		}
+		if (permission.requirement === 'required' && permission.degradedBehavior) {
+			throw new Error(`required permission cannot declare degraded behavior: ${permission.scope}`);
+		}
+		seen.add(permission.scope);
+	}
+}
+
 export function buildInitializeResult(
 	descriptor: AppDescriptor,
 	options?: { uiEnabled?: boolean },
@@ -43,6 +90,7 @@ export function buildInitializeResult(
 	serverInfo: Record<string, unknown>;
 } {
 	validateDescriptorCapabilities(descriptor.capabilities);
+	validateDescriptorPermissions(descriptor);
 
 	const capabilities: Record<string, unknown> = {
 		tools: {},
@@ -64,6 +112,7 @@ export function buildInitializeResult(
 	};
 	if (descriptor.relayIcon) serverInfo.icon = descriptor.relayIcon;
 	if (descriptor.scopes?.length) serverInfo.scopes = [...descriptor.scopes];
+	if (descriptor.permissions?.length) serverInfo.permissions = descriptor.permissions.map((permission) => ({ ...permission }));
 
 	return {
 		protocolVersion: MCP_PROTOCOL_VERSION,
@@ -73,7 +122,9 @@ export function buildInitializeResult(
 }
 
 export function buildManifestJson(descriptor: AppDescriptor): Record<string, unknown> {
+	validateDescriptorPermissions(descriptor);
 	return {
+		schemaVersion: descriptor.permissions ? 2 : 1,
 		name: descriptor.id,
 		version: descriptor.version,
 		title: descriptor.title || descriptor.name,
@@ -90,6 +141,7 @@ export function buildManifestJson(descriptor: AppDescriptor): Record<string, unk
 			: {}),
 		...(descriptor.homepage ? { homepage: descriptor.homepage } : {}),
 		...(descriptor.scopes ? { scopes: [...descriptor.scopes] } : {}),
+		...(descriptor.permissions ? { permissions: descriptor.permissions.map((permission) => ({ ...permission })) } : {}),
 	};
 }
 
@@ -99,12 +151,15 @@ export function buildPairingMetadata(descriptor: AppDescriptor): {
 	version: string;
 	icon?: string;
 	scopes?: string[];
+	permissions?: AppPermissionDescriptor[];
 } {
+	validateDescriptorPermissions(descriptor);
 	return {
 		name: descriptor.title || descriptor.name || descriptor.id,
 		description: descriptor.description ?? '',
 		version: descriptor.version,
 		...(descriptor.relayIcon ? { icon: descriptor.relayIcon } : {}),
 		...(descriptor.scopes?.length ? { scopes: [...descriptor.scopes] } : {}),
+		...(descriptor.permissions?.length ? { permissions: descriptor.permissions.map((permission) => ({ ...permission })) } : {}),
 	};
 }

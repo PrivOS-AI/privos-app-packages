@@ -3,6 +3,7 @@ import WebSocket, { type RawData } from 'ws';
 import {
 	buildPairingMetadata,
 	type AppDescriptor,
+	type AppPermissionDescriptor,
 } from '../app-descriptor.js';
 import type { AuthOptions } from '../auth/user-token.js';
 import {
@@ -31,6 +32,7 @@ export interface PairAppMeta {
 	version?: string;
 	icon?: string;
 	scopes?: string[];
+	permissions?: AppPermissionDescriptor[];
 }
 
 export interface PairingResult {
@@ -120,6 +122,7 @@ export function pairOverWebSocket(
 						version: appMeta.version || '0.0.0',
 						...(appMeta.icon && { icon: appMeta.icon }),
 						...(appMeta.scopes?.length && { scopes: appMeta.scopes }),
+						...(appMeta.permissions?.length && { permissions: appMeta.permissions }),
 					}),
 				);
 			} catch (err) {

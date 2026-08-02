@@ -53,20 +53,15 @@ export interface McpApp {
 }
 
 /**
- * Host context pushed by the hub to the app iframe on every context change.
- * `userToken` is a short-lived RS256 JWT signed by the hub private key.
- * It lets the app's OWN backend cryptographically verify who triggered a request
- * without trusting any client-supplied userId (which is forgeable).
+ * Non-secret host context pushed by Hub to the app iframe on context changes.
+ * Backend identity is conveyed separately in a Hub-signed private dispatch
+ * assertion; browser bearer/user tokens are never exposed to the iframe.
  */
 export interface PrivosHostContext {
 	userId?: string;
 	username?: string;
 	theme?: string;
 	roomId?: string;
-	/** Short-lived RS256 JWT. Claims: sub=userId, aud=appId, preferred_username, rid?, exp (~5 min).
-	 *  Forward this in `Authorization: Bearer <token>` when calling your app's own backend.
-	 *  Verify via the hub JWKS at `<hubBaseUrl>/.well-known/mcp-apps/jwks.json`. */
-	userToken?: string;
 	[key: string]: unknown;
 }
 

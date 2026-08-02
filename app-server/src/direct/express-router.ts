@@ -25,6 +25,8 @@ import {
 	type RuntimeLimits,
 	type UiResourceProvider,
 } from '../runtime.js';
+import { getWorkloadIdentityClient } from '../workload/workload-identity.js';
+import { verifyDispatchAssertion } from '../workload/dispatch-assertion.js';
 
 export interface DirectRouterOptions {
 	descriptor: AppDescriptor | (() => AppDescriptor | Promise<AppDescriptor>);
@@ -48,6 +50,8 @@ export interface DirectRouterOptions {
 		headers: Request['headers'];
 	}>;
 	runtime?: AppServerRuntime;
+	/** Require Hub dispatch assertions when the Cluster identity socket is mounted. */
+	workloadSecurity?: 'auto' | 'required' | 'disabled';
 }
 
 const REQUIRED_CORS_HEADERS = [
@@ -56,6 +60,7 @@ const REQUIRED_CORS_HEADERS = [
 	'X-MCP-User-Id',
 	'Mcp-Session-Id',
 	'MCP-Protocol-Version',
+	'X-PrivOS-Dispatch-Assertion',
 ] as const;
 
 /**
@@ -167,6 +172,24 @@ async function handleMcpPost(
 		body && typeof body === 'object' && Object.prototype.hasOwnProperty.call(body, 'id')
 			? (body as { id: string | number | null }).id
 			: undefined;
+
+	const workloadClient = getWorkloadIdentityClient();
+	const workloadSecurity = options.workloadSecurity ?? 'auto';
+	const requireDispatchAssertion = workloadSecurity === 'required' || (workloadSecurity === 'auto' && workloadClient.isAvailable());
+	if (requireDispatchAssertion) {
+		try {
+			const assertion = headerValue(req.headers['x-privos-dispatch-assertion']);
+			if (!assertion) throw new Error('dispatch_assertion_missing');
+			verifyDispatchAssertion({ compact: assertion, body, context: await workloadClient.brokerContext() });
+		} catch {
+			res.status(403).json(
+				errorResponse(requestId ?? null, jsonRpcError(INVALID_REQUEST, 'Authenticated private dispatch required', {
+					code: 'DISPATCH_ASSERTION_INVALID',
+				})),
+			);
+			return;
+		}
+	}
 
 	const sessionHeader = headerValue(req.headers['mcp-session-id']);
 	const sessionScope = sessionHeader?.trim()
