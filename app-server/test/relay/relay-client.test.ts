@@ -1,15 +1,135 @@
+import crypto from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
 
 import type { AppDescriptor } from '../../src/app-descriptor.js';
 import { connectRelay, pairOverWebSocket } from '../../src/relay/relay-client.js';
 import { relayCallerAuthSurface } from '../../src/runtime.js';
+import {
+	BoundedRuntimeDispatchReplayConsumerV3,
+	sha256RuntimeDispatchBodyV3,
+	type RuntimeDispatchSecurityV3,
+} from '../../src/workload/dispatch-assertion.js';
 
 const descriptor: AppDescriptor = {
 	id: 'ai.privos.demo',
 	name: 'Demo',
 	version: '0.0.1',
 };
+
+function canonicalize(value: unknown): unknown {
+	if (Array.isArray(value)) return value.map(canonicalize);
+	if (value && typeof value === 'object') {
+		return Object.fromEntries(
+			Object.entries(value as Record<string, unknown>)
+				.filter(([, child]) => child !== undefined)
+				.sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+				.map(([key, child]) => [key, canonicalize(child)]),
+		);
+	}
+	return value;
+}
+
+function canonical(value: unknown): string {
+	return JSON.stringify(canonicalize(value));
+}
+
+function signedRelayDispatch(): {
+	logicalRpc: Record<string, unknown>;
+	envelope: Record<string, unknown>;
+	security: RuntimeDispatchSecurityV3;
+} {
+	const pair = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
+	const publicJwk = pair.publicKey.export({ format: 'jwk' });
+	const kid = crypto.createHash('sha256').update(canonical({
+		crv: publicJwk.crv,
+		kty: publicJwk.kty,
+		x: publicJwk.x,
+		y: publicJwk.y,
+	})).digest('base64url');
+	const now = 2_000_000_000;
+	const affinity = {
+		workspaceId: 'workspace-relay',
+		deploymentId: 'deployment-relay',
+		mcpAppId: descriptor.id,
+		executionMode: 'PUBLISHER_HOSTED' as const,
+		generationId: 'generation-relay',
+		generationNumber: 1,
+		runtimeInstallationId: 'installation-relay',
+		manifestDigest: `sha256:${'a'.repeat(64)}`,
+		resourceManifestHash: 'B'.repeat(43),
+		runtimeResourceInventoryHash: 'C'.repeat(43),
+		runtimeApprovalReceiptHash: 'D'.repeat(43),
+		runtimeAuthorizationEpoch: 1,
+	};
+	const logicalRpc = {
+		jsonrpc: '2.0',
+		id: 7,
+		method: 'tools/call',
+		params: {
+			_meta: { traceId: 'trace-relay' },
+			name: 'demo.ping',
+			arguments: { message: 'hello' },
+		},
+	};
+	const payload = {
+		protocolVersion: 3,
+		type: 'hub-runtime-dispatch-assertion',
+		iss: `hub:${affinity.deploymentId}`,
+		aud: `mcp-runtime:${affinity.mcpAppId}`,
+		jti: crypto.randomUUID(),
+		nonce: crypto.randomBytes(24).toString('base64url'),
+		iat: now,
+		exp: now + 30,
+		...affinity,
+		authorizationContext: 'room',
+		roomId: 'room-relay',
+		authorizationBindingId: 'binding-relay',
+		bindingReceiptHash: 'E'.repeat(43),
+		bindingGrantHash: 'F'.repeat(43),
+		bindingEpoch: 1,
+		bindingTokenVersion: 1,
+		htm: 'POST',
+		htu: '/mcp',
+		bodyDigest: sha256RuntimeDispatchBodyV3(logicalRpc),
+	};
+	const encodedHeader = Buffer.from(canonical({
+		alg: 'ES256',
+		kid,
+		privos_protocol: 3,
+		typ: 'privos-hub-runtime-dispatch+jws',
+	})).toString('base64url');
+	const encodedPayload = Buffer.from(canonical(payload)).toString('base64url');
+	const signature = crypto.sign('sha256', Buffer.from(`${encodedHeader}.${encodedPayload}`, 'ascii'), {
+		key: pair.privateKey,
+		dsaEncoding: 'ieee-p1363',
+	}).toString('base64url');
+	const assertion = `${encodedHeader}.${encodedPayload}.${signature}`;
+	return {
+		logicalRpc,
+		envelope: {
+			...logicalRpc,
+			params: {
+				...(logicalRpc.params as Record<string, unknown>),
+				_meta: {
+					traceId: 'trace-relay',
+					privosAuthorization: {
+						assertion,
+						runtimeInstallationId: 'installation-relay',
+						authorizationBindingId: 'binding-relay',
+					},
+					privosUser: { userToken: 'token-relay', userId: 'user-relay', roomId: 'room-relay' },
+				},
+			},
+		},
+		security: {
+			mode: 'required',
+			trust: { hubKid: kid, hubPublicJwk: publicJwk, affinity },
+			now: () => now,
+			replayConsumer: new BoundedRuntimeDispatchReplayConsumerV3(),
+		},
+	};
+}
 
 class FakeWebSocket extends EventEmitter {
 	static OPEN = 1;
@@ -55,6 +175,186 @@ describe('relayCallerAuthSurface', () => {
 });
 
 describe('connectRelay', () => {
+	it('verifies nested v3 authorization, sanitizes handler input, and propagates room affinity', async () => {
+		FakeWebSocket.instances = [];
+		const signed = signedRelayDispatch();
+		const seenRequests: unknown[] = [];
+		const seenContexts: unknown[] = [];
+		const seenAuthSurfaces: unknown[] = [];
+		const fetchImpl = vi.fn(async () => ({
+			ok: true,
+			json: async () => ({ access_token: 'tok' }),
+		}));
+		const handle = connectRelay({
+			privosUrl: 'http://hub.test',
+			clientId: 'cid',
+			clientSecret: 'sec',
+			descriptor,
+			runtimeDispatchV3: signed.security,
+			extractCallerCredential: async (surface) => {
+				seenAuthSurfaces.push(surface);
+				return undefined;
+			},
+			handler: async (rpc, context) => {
+				seenRequests.push(rpc);
+				seenContexts.push(context);
+				return { ok: true };
+			},
+			fetchImpl: fetchImpl as unknown as typeof fetch,
+			WebSocketImpl: FakeWebSocket as unknown as typeof import('ws').default,
+		});
+
+		await handle.whenConnected();
+		const ws = FakeWebSocket.instances[0]!;
+		ws.emit('message', Buffer.from(JSON.stringify(signed.envelope)));
+		await vi.waitFor(() => expect(ws.sent.length).toBe(1));
+		expect(JSON.parse(ws.sent[0]!)).toMatchObject({ id: 7, result: { ok: true } });
+		expect(seenRequests).toEqual([signed.logicalRpc]);
+		expect(seenAuthSurfaces).toEqual([{
+			_meta: {
+				privosUser: { userToken: 'token-relay', userId: 'user-relay', roomId: 'room-relay' },
+			},
+		}]);
+		expect(seenContexts[0]).toMatchObject({
+			roomId: 'room-relay',
+			runtimeAuthorization: {
+				authorizationContext: 'room',
+				runtimeInstallationId: 'installation-relay',
+				authorizationBindingId: 'binding-relay',
+				roomId: 'room-relay',
+			},
+		});
+		expect(Object.isFrozen(
+			(seenContexts[0] as { runtimeAuthorization: object }).runtimeAuthorization,
+		)).toBe(true);
+		await handle.stop();
+	});
+
+	it('rejects wrapper mismatch, body tamper, reserved collisions, and replay before handler dispatch', async () => {
+		FakeWebSocket.instances = [];
+		const signed = signedRelayDispatch();
+		const handler = vi.fn(async () => ({ ok: true }));
+		const fetchImpl = vi.fn(async () => ({
+			ok: true,
+			json: async () => ({ access_token: 'tok' }),
+		}));
+		const handle = connectRelay({
+			privosUrl: 'http://hub.test',
+			clientId: 'cid',
+			clientSecret: 'sec',
+			descriptor,
+			runtimeDispatchV3: signed.security,
+			handler,
+			fetchImpl: fetchImpl as unknown as typeof fetch,
+			WebSocketImpl: FakeWebSocket as unknown as typeof import('ws').default,
+		});
+		await handle.whenConnected();
+		const ws = FakeWebSocket.instances[0]!;
+
+		const wrongRuntime = structuredClone(signed.envelope);
+		const wrongRuntimeMeta = (wrongRuntime.params as { _meta: Record<string, unknown> })._meta;
+		(wrongRuntimeMeta.privosAuthorization as Record<string, unknown>).runtimeInstallationId = 'wrong';
+		const wrongBinding = structuredClone(signed.envelope);
+		const wrongBindingMeta = (wrongBinding.params as { _meta: Record<string, unknown> })._meta;
+		(wrongBindingMeta.privosAuthorization as Record<string, unknown>).authorizationBindingId = 'wrong';
+		const tampered = structuredClone(signed.envelope);
+		(tampered.params as { arguments: { message: string } }).arguments.message = 'tampered';
+		const topLevelCollision = { ...signed.envelope, _meta: { privosUser: { userId: 'collision' } } };
+
+		for (const message of [wrongRuntime, wrongBinding, tampered, topLevelCollision]) {
+			ws.emit('message', Buffer.from(JSON.stringify(message)));
+			await vi.waitFor(() => expect(ws.sent.length).toBeGreaterThanOrEqual(1));
+			const response = JSON.parse(ws.sent.at(-1)!);
+			expect(response.error.data.code).toBe('DISPATCH_ASSERTION_INVALID');
+			ws.sent.splice(0);
+		}
+		expect(handler).not.toHaveBeenCalled();
+
+		ws.emit('message', Buffer.from(JSON.stringify(signed.envelope)));
+		await vi.waitFor(() => expect(ws.sent.length).toBe(1));
+		expect(JSON.parse(ws.sent[0]!)).toMatchObject({ result: { ok: true } });
+		expect(handler).toHaveBeenCalledTimes(1);
+		ws.sent.splice(0);
+
+		ws.emit('message', Buffer.from(JSON.stringify(signed.envelope)));
+		await vi.waitFor(() => expect(ws.sent.length).toBe(1));
+		expect(JSON.parse(ws.sent[0]!).error.data.code).toBe('DISPATCH_ASSERTION_INVALID');
+		expect(handler).toHaveBeenCalledTimes(1);
+		await handle.stop();
+	});
+
+	it('never permits unsigned Relay requests, including the Direct-only discovery exception', async () => {
+		FakeWebSocket.instances = [];
+		const signed = signedRelayDispatch();
+		const handler = vi.fn(async () => ({ tools: [] }));
+		const fetchImpl = vi.fn(async () => ({
+			ok: true,
+			json: async () => ({ access_token: 'tok' }),
+		}));
+		const handle = connectRelay({
+			privosUrl: 'http://hub.test',
+			clientId: 'cid',
+			clientSecret: 'sec',
+			descriptor,
+			runtimeDispatchV3: {
+				...signed.security,
+				unsignedReadiness: 'initialize-and-tools-list',
+			},
+			handler,
+			fetchImpl: fetchImpl as unknown as typeof fetch,
+			WebSocketImpl: FakeWebSocket as unknown as typeof import('ws').default,
+		});
+		await handle.whenConnected();
+		const ws = FakeWebSocket.instances[0]!;
+		const directOnlyBodies = [
+			{
+				jsonrpc: '2.0', id: 1, method: 'initialize', params: {
+					protocolVersion: '2025-03-26',
+					capabilities: { extensions: {
+						'io.modelcontextprotocol/ui': { mimeTypes: ['text/html;profile=mcp-app'] },
+					} },
+					clientInfo: { name: 'privos-hub', version: '1.0.0' },
+				},
+			},
+			{ jsonrpc: '2.0', method: 'notifications/initialized' },
+			{ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} },
+		];
+		for (const body of directOnlyBodies) {
+			ws.emit('message', Buffer.from(JSON.stringify(body)));
+			await vi.waitFor(() => expect(ws.sent.length).toBe(1));
+			expect(JSON.parse(ws.sent[0]!).error.data.code).toBe('DISPATCH_ASSERTION_INVALID');
+			ws.sent.splice(0);
+		}
+		expect(handler).not.toHaveBeenCalled();
+		await handle.stop();
+	});
+
+	it('rejects v3 Relay metadata when receiver trust is not configured', async () => {
+		FakeWebSocket.instances = [];
+		const signed = signedRelayDispatch();
+		const handler = vi.fn(async () => ({ ok: true }));
+		const fetchImpl = vi.fn(async () => ({
+			ok: true,
+			json: async () => ({ access_token: 'tok' }),
+		}));
+		const handle = connectRelay({
+			privosUrl: 'http://hub.test',
+			clientId: 'cid',
+			clientSecret: 'sec',
+			descriptor,
+			handler,
+			fetchImpl: fetchImpl as unknown as typeof fetch,
+			WebSocketImpl: FakeWebSocket as unknown as typeof import('ws').default,
+		});
+		await handle.whenConnected();
+		const ws = FakeWebSocket.instances[0]!;
+		ws.emit('message', Buffer.from(JSON.stringify(signed.envelope)));
+		await vi.waitFor(() => expect(ws.sent.length).toBe(1));
+		expect(JSON.parse(ws.sent[0]!).error.data.code).toBe('DISPATCH_ASSERTION_INVALID');
+		expect(handler).not.toHaveBeenCalled();
+		await handle.stop();
+	});
+
 	it('fetches oauth token, answers tools/list, ignores notifications', async () => {
 		FakeWebSocket.instances = [];
 		const logs: Array<{ event: string; fields: Record<string, unknown> }> = [];

@@ -14,5 +14,47 @@ export type {
 	WorkloadIdentityClientOptions,
 	WorkloadIdentityErrorCode,
 } from './workload-identity.js';
-export { verifyDispatchAssertion } from './dispatch-assertion.js';
-export type { VerifiedDispatchActor, VerifiedDispatchAssertion } from './dispatch-assertion.js';
+export {
+	BoundedRuntimeDispatchReplayConsumerV3,
+	assertRuntimeDispatchRelayAffinityV3,
+	assertRuntimeDispatchTrustConfigurationV3,
+	extractRuntimeDispatchRelayEnvelopeV3,
+	isExactRuntimeReadinessRpcV3,
+	isUnsignedRuntimeReadinessRpcV3,
+	parseRuntimeDispatchTrustV3Json,
+	sha256RuntimeDispatchBodyV3,
+	verifyDispatchAssertion,
+	verifyRuntimeDispatchAssertionV3,
+} from './dispatch-assertion.js';
+export type {
+	RuntimeDispatchAffinityV3,
+	RuntimeDispatchExecutionModeV3,
+	RuntimeDispatchRelayAuthorizationV3,
+	RuntimeDispatchRelayEnvelopeV3,
+	RuntimeDispatchReplayConsumerV3,
+	RuntimeDispatchReplayInputV3,
+	RuntimeDispatchSecurityV3,
+	RuntimeDispatchTrustHintV3,
+	RuntimeDispatchTrustResolverV3,
+	RuntimeDispatchTrustV3,
+	VerifiedDispatchActor,
+	VerifiedDispatchAssertion,
+	VerifiedRuntimeDispatchAssertionV3,
+} from './dispatch-assertion.js';
+export {
+	createPinnedPortalJwksResolverV3,
+	createPublisherRuntimeTrustProvisioningRouterV3,
+	SingleProcessFilePublisherRuntimeTrustStoreV3,
+} from './publisher-runtime-trust.js';
+export type {
+	PublisherPortalJwksResolutionV3,
+	PublisherPortalJwksResolverV3,
+	PublisherRuntimeTrustActiveEvidenceV3,
+	PublisherRuntimeTrustDurableStoreV3,
+	PublisherRuntimeTrustEvidenceV3,
+	PublisherRuntimeTrustOperationV3,
+	PublisherRuntimeTrustPreparedEvidenceV3,
+	PublisherRuntimeTrustProvisioningRequestV3,
+	PublisherRuntimeTrustProvisioningRouterOptionsV3,
+	PublisherRuntimeTrustStoreMutationV3,
+} from './publisher-runtime-trust.js';

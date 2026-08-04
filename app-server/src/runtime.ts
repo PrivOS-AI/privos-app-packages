@@ -35,6 +35,7 @@ import type {
 	McpResponse,
 	ParsedInbound,
 } from './protocol/types.js';
+import type { VerifiedRuntimeDispatchAssertionV3 } from './workload/dispatch-assertion.js';
 
 export type AppMcpHandler = (
 	request: ApplicationMcpRequest,
@@ -170,6 +171,7 @@ export class AppServerRuntime {
 		credentialResolution?: CallerCredentialResolution;
 		traceId?: string;
 		signal?: AbortSignal;
+		runtimeAuthorization?: VerifiedRuntimeDispatchAssertionV3;
 	}): Promise<ToolCallContext> {
 		const descriptor = await this.resolveDescriptor();
 		const base: ToolCallContext = {
@@ -179,6 +181,10 @@ export class AppServerRuntime {
 			traceId: input.traceId,
 			sessionScope: input.sessionScope,
 			identityState: 'missing',
+			...(input.runtimeAuthorization ? { runtimeAuthorization: input.runtimeAuthorization } : {}),
+			...(input.runtimeAuthorization?.authorizationContext === 'room'
+				? { roomId: input.runtimeAuthorization.roomId }
+				: {}),
 			...(input.signal ? { signal: input.signal } : {}),
 		};
 
@@ -219,11 +225,22 @@ export class AppServerRuntime {
 			};
 		}
 
+		if (
+			input.runtimeAuthorization &&
+			(input.runtimeAuthorization.authorizationContext === 'room'
+				? verified.actor.roomId !== input.runtimeAuthorization.roomId
+				: verified.actor.roomId !== undefined)
+		) {
+			throw new Error('dispatch_assertion_binding_mismatch');
+		}
+
 		return {
 			...base,
 			identityState: 'verified',
 			actor: verified.actor,
-			roomId: verified.actor.roomId,
+			roomId: input.runtimeAuthorization?.authorizationContext === 'room'
+				? input.runtimeAuthorization.roomId
+				: verified.actor.roomId,
 		};
 	}
 
@@ -494,7 +511,7 @@ export function extractDirectCallerCredential(headers: {
 }
 
 /**
- * Reserved Relay auth surface only — never includes `params` / `arguments`.
+ * Reserved Relay auth surface only — never includes non-reserved `params` / `arguments`.
  * Extractors receive this shape, not the full JSON-RPC message.
  */
 export interface RelayCallerAuthSurface {
@@ -511,6 +528,22 @@ export function relayCallerAuthSurface(
 	}
 	if (Object.prototype.hasOwnProperty.call(message, 'meta')) {
 		surface.meta = message.meta;
+	}
+	const params = message.params;
+	if (params && typeof params === 'object' && !Array.isArray(params)) {
+		const nestedMeta = (params as Record<string, unknown>)._meta;
+		if (
+			nestedMeta &&
+			typeof nestedMeta === 'object' &&
+			!Array.isArray(nestedMeta) &&
+			Object.prototype.hasOwnProperty.call(nestedMeta, 'privosUser')
+		) {
+			const privosUser = (nestedMeta as Record<string, unknown>).privosUser;
+			if (surface._meta === undefined) surface._meta = { privosUser };
+			else if (surface._meta && typeof surface._meta === 'object' && !Array.isArray(surface._meta)) {
+				surface._meta = { ...(surface._meta as Record<string, unknown>), privosUser };
+			}
+		}
 	}
 	return surface;
 }

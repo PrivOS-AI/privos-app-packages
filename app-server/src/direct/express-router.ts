@@ -26,7 +26,13 @@ import {
 	type UiResourceProvider,
 } from '../runtime.js';
 import { getWorkloadIdentityClient } from '../workload/workload-identity.js';
-import { verifyDispatchAssertion } from '../workload/dispatch-assertion.js';
+import {
+	isUnsignedRuntimeReadinessRpcV3,
+	verifyDispatchAssertion,
+	verifyRuntimeDispatchAssertionV3,
+	type RuntimeDispatchSecurityV3,
+	type VerifiedRuntimeDispatchAssertionV3,
+} from '../workload/dispatch-assertion.js';
 
 export interface DirectRouterOptions {
 	descriptor: AppDescriptor | (() => AppDescriptor | Promise<AppDescriptor>);
@@ -52,6 +58,8 @@ export interface DirectRouterOptions {
 	runtime?: AppServerRuntime;
 	/** Require Hub dispatch assertions when the Cluster identity socket is mounted. */
 	workloadSecurity?: 'auto' | 'required' | 'disabled';
+	/** Explicit required final-boundary authorization for local or publisher protocol-v3 runtimes. */
+	runtimeDispatchV3?: RuntimeDispatchSecurityV3;
 }
 
 const REQUIRED_CORS_HEADERS = [
@@ -61,6 +69,7 @@ const REQUIRED_CORS_HEADERS = [
 	'Mcp-Session-Id',
 	'MCP-Protocol-Version',
 	'X-PrivOS-Dispatch-Assertion',
+	'X-PrivOS-MCP-Dispatch-Assertion',
 ] as const;
 
 /**
@@ -82,6 +91,12 @@ export function createDirectRouter(options: DirectRouterOptions): Router {
 		});
 
 	const mcpPath = options.mcpPath ?? '/mcp';
+	if (options.runtimeDispatchV3 && mcpPath !== '/mcp') {
+		throw new Error('Protocol-v3 runtime dispatch requires the canonical /mcp path.');
+	}
+	if (options.runtimeDispatchV3 && options.workloadSecurity === 'required') {
+		throw new Error('Legacy managed workload security and runtime-v3 security cannot both be required.');
+	}
 	const manifestPath = options.manifestPath ?? '/.well-known/mcp/manifest.json';
 	const allowHeaders = mergeCorsHeaders(options.corsAllowHeaders);
 	const maxBytes = runtime.getLimits().maxMessageBytes || DEFAULT_MAX_MESSAGE_BYTES;
@@ -156,52 +171,96 @@ async function handleMcpPost(
 	runtime: AppServerRuntime,
 	options: DirectRouterOptions,
 ): Promise<void> {
+	const body = req.body;
+	const candidateRequestId =
+		body && typeof body === 'object' && Object.prototype.hasOwnProperty.call(body, 'id')
+			? (body as { id: unknown }).id
+			: undefined;
+	const requestId = candidateRequestId === null ||
+		typeof candidateRequestId === 'string' ||
+		typeof candidateRequestId === 'number'
+		? candidateRequestId
+		: undefined;
+
+	let runtimeAuthorization: VerifiedRuntimeDispatchAssertionV3 | undefined;
+	const legacyAssertionHeaders = rawHeaderValues(req, 'x-privos-dispatch-assertion');
+	const runtimeAssertionHeaders = rawHeaderValues(req, 'x-privos-mcp-dispatch-assertion');
+	const unsupportedRuntimeAffinityHeaders = [
+		...rawHeaderValues(req, 'x-privos-mcp-runtime-installation-id'),
+		...rawHeaderValues(req, 'x-privos-mcp-authorization-binding-id'),
+	];
+	if (unsupportedRuntimeAffinityHeaders.length > 0) {
+		denyDispatch(res, requestId);
+		return;
+	}
+	if (options.runtimeDispatchV3) {
+		try {
+			if (legacyAssertionHeaders.length > 0 || runtimeAssertionHeaders.length > 1) {
+				throw new Error('dispatch_assertion_ambiguous');
+			}
+			if (runtimeAssertionHeaders.length === 0) {
+				if (!isUnsignedRuntimeReadinessRpcV3(body, options.runtimeDispatchV3)) {
+					throw new Error('dispatch_assertion_missing');
+				}
+			} else {
+				runtimeAuthorization = await verifyRuntimeDispatchAssertionV3({
+					compact: runtimeAssertionHeaders[0]!,
+					body,
+					security: options.runtimeDispatchV3,
+				});
+			}
+		} catch {
+			denyDispatch(res, requestId);
+			return;
+		}
+	} else {
+		if (runtimeAssertionHeaders.length > 0) {
+			denyDispatch(res, requestId);
+			return;
+		}
+		const workloadClient = getWorkloadIdentityClient();
+		const workloadSecurity = options.workloadSecurity ?? 'auto';
+		const requireDispatchAssertion = workloadSecurity === 'required' || (workloadSecurity === 'auto' && workloadClient.isAvailable());
+		if (requireDispatchAssertion) {
+			try {
+				const assertion = headerValue(req.headers['x-privos-dispatch-assertion']);
+				if (!assertion) throw new Error('dispatch_assertion_missing');
+				verifyDispatchAssertion({ compact: assertion, body, context: await workloadClient.brokerContext() });
+			} catch {
+				denyDispatch(res, requestId);
+				return;
+			}
+		}
+	}
 	const extract =
 		options.extractCallerCredential ??
 		((ingress: { headers: Request['headers'] }) =>
 			extractDirectCallerCredential(
 				ingress.headers as Record<string, string | string[] | undefined>,
 			));
-
-	const credentialResolution = await resolveCallerCredential(extract, {
-		headers: req.headers,
-	});
-
-	const body = req.body;
-	const requestId =
-		body && typeof body === 'object' && Object.prototype.hasOwnProperty.call(body, 'id')
-			? (body as { id: string | number | null }).id
-			: undefined;
-
-	const workloadClient = getWorkloadIdentityClient();
-	const workloadSecurity = options.workloadSecurity ?? 'auto';
-	const requireDispatchAssertion = workloadSecurity === 'required' || (workloadSecurity === 'auto' && workloadClient.isAvailable());
-	if (requireDispatchAssertion) {
-		try {
-			const assertion = headerValue(req.headers['x-privos-dispatch-assertion']);
-			if (!assertion) throw new Error('dispatch_assertion_missing');
-			verifyDispatchAssertion({ compact: assertion, body, context: await workloadClient.brokerContext() });
-		} catch {
-			res.status(403).json(
-				errorResponse(requestId ?? null, jsonRpcError(INVALID_REQUEST, 'Authenticated private dispatch required', {
-					code: 'DISPATCH_ASSERTION_INVALID',
-				})),
-			);
-			return;
-		}
-	}
+	const credentialResolution = await resolveCallerCredential(extract, { headers: req.headers });
 
 	const sessionHeader = headerValue(req.headers['mcp-session-id']);
 	const sessionScope = sessionHeader?.trim()
 		? `mcp-session:${sessionHeader.trim()}`
 		: ephemeralSessionScope('direct');
 
-	const context = await runtime.buildContext({
-		transport: 'direct',
-		requestId,
-		sessionScope,
-		credentialResolution,
-	});
+	let context;
+	try {
+		context = await runtime.buildContext({
+			transport: 'direct',
+			requestId,
+			sessionScope,
+			credentialResolution,
+			...(runtimeAuthorization ? { runtimeAuthorization } : {}),
+		});
+	} catch (error) {
+		if (runtimeAuthorization && error instanceof Error && error.message === 'dispatch_assertion_binding_mismatch') {
+			denyDispatch(res, requestId);
+			return;
+		}
+		throw error;
+	}
 
 	const outcome = await runtime.dispatchObject(body, context);
 
@@ -241,6 +300,22 @@ function isBodyTooLargeError(err: unknown): boolean {
 function headerValue(value: string | string[] | undefined): string | undefined {
 	if (Array.isArray(value)) return value[0];
 	return value;
+}
+
+function rawHeaderValues(req: Request, name: string): string[] {
+	const values: string[] = [];
+	for (let index = 0; index < req.rawHeaders.length; index += 2) {
+		if (req.rawHeaders[index]?.toLowerCase() === name) values.push(req.rawHeaders[index + 1] ?? '');
+	}
+	return values;
+}
+
+function denyDispatch(res: Response, requestId: string | number | null | undefined): void {
+	res.status(403).json(
+		errorResponse(requestId ?? null, jsonRpcError(INVALID_REQUEST, 'Authenticated private dispatch required', {
+			code: 'DISPATCH_ASSERTION_INVALID',
+		})),
+	);
 }
 
 function mergeCorsHeaders(extra?: string[]): string[] {

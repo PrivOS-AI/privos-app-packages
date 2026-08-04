@@ -7,6 +7,7 @@ import {
 } from '../app-descriptor.js';
 import type { AuthOptions } from '../auth/user-token.js';
 import {
+	INVALID_REQUEST,
 	PARSE_ERROR,
 	errorResponse,
 	jsonRpcError,
@@ -25,6 +26,12 @@ import {
 	type UiResourceProvider,
 } from '../runtime.js';
 import { MessageTooLargeError, rawDataToText } from './message-adapter.js';
+import {
+	extractRuntimeDispatchRelayEnvelopeV3,
+	verifyRuntimeDispatchAssertionV3,
+	type RuntimeDispatchSecurityV3,
+	type VerifiedRuntimeDispatchAssertionV3,
+} from '../workload/dispatch-assertion.js';
 
 export interface PairAppMeta {
 	name: string;
@@ -70,6 +77,8 @@ export interface RelayClientOptions {
 	fetchImpl?: typeof fetch;
 	WebSocketImpl?: typeof WebSocket;
 	runtime?: AppServerRuntime;
+	/** Explicit required final-boundary authorization for protocol-v3 publisher Relay traffic. */
+	runtimeDispatchV3?: RuntimeDispatchSecurityV3;
 }
 
 export interface RelayHandle {
@@ -501,12 +510,49 @@ export function connectRelay(opts: RelayClientOptions): RelayHandle {
 			return;
 		}
 
-		const msgObj =
+		const transportMsgObj =
 			parsedJson && typeof parsedJson === 'object' && !Array.isArray(parsedJson)
 				? (parsedJson as Record<string, unknown>)
 				: {};
+		let dispatchObject: unknown = parsedJson;
+		let runtimeAuthorization: VerifiedRuntimeDispatchAssertionV3 | undefined;
+		const isRequest = typeof transportMsgObj.method === 'string';
+		const transportParams = isRecord(transportMsgObj.params) ? transportMsgObj.params : undefined;
+		const transportMeta = isRecord(transportParams?._meta) ? transportParams._meta : undefined;
+		const hasRuntimeAuthorization = Boolean(
+			transportMeta && Object.prototype.hasOwnProperty.call(transportMeta, 'privosAuthorization'),
+		);
+		if (isRequest && opts.runtimeDispatchV3) {
+			try {
+				if (hasTopLevelRuntimeMetadata(transportMsgObj)) {
+					throw new Error('dispatch_assertion_ambiguous');
+				}
+				if (!hasRuntimeAuthorization) {
+					throw new Error('dispatch_assertion_missing');
+				} else {
+					const envelope = extractRuntimeDispatchRelayEnvelopeV3(parsedJson);
+					runtimeAuthorization = await verifyRuntimeDispatchAssertionV3({
+						compact: envelope.authorization.assertion,
+						body: envelope.logicalRpc,
+						security: opts.runtimeDispatchV3,
+						relayAuthorization: envelope.authorization,
+					});
+					dispatchObject = envelope.logicalRpc;
+				}
+			} catch {
+				safeSend(ws, dispatchAuthorizationError(transportMsgObj), { generation });
+				return;
+			}
+		} else if (isRequest && (hasRuntimeAuthorization || hasTopLevelRuntimeMetadata(transportMsgObj))) {
+			safeSend(ws, dispatchAuthorizationError(transportMsgObj), { generation });
+			return;
+		}
+		const msgObj =
+			dispatchObject && typeof dispatchObject === 'object' && !Array.isArray(dispatchObject)
+				? (dispatchObject as Record<string, unknown>)
+				: {};
 
-		const authSurface = relayCallerAuthSurface(msgObj);
+		const authSurface = relayCallerAuthSurface(transportMsgObj);
 		const credentialResolution = await resolveCallerCredential(
 			opts.extractCallerCredential,
 			authSurface,
@@ -532,14 +578,24 @@ export function connectRelay(opts: RelayClientOptions): RelayHandle {
 			...(toolName ? { toolName } : {}),
 		});
 
-		const context = await runtime.buildContext({
-			transport: 'relay',
-			requestId,
-			sessionScope: `ws:${generation}`,
-			credentialResolution,
-		});
+		let context;
+		try {
+			context = await runtime.buildContext({
+				transport: 'relay',
+				requestId,
+				sessionScope: `ws:${generation}`,
+				credentialResolution,
+				...(runtimeAuthorization ? { runtimeAuthorization } : {}),
+			});
+		} catch (error) {
+			if (runtimeAuthorization && error instanceof Error && error.message === 'dispatch_assertion_binding_mismatch') {
+				safeSend(ws, dispatchAuthorizationError(msgObj), { generation, method, toolName });
+				return;
+			}
+			throw error;
+		}
 
-		const outcome = await runtime.dispatchObject(parsedJson, context);
+		const outcome = await runtime.dispatchObject(dispatchObject, context);
 
 		if (outcome.type === 'no_response' || outcome.type === 'protocol_warning') {
 			return;
@@ -582,4 +638,28 @@ export function connectRelay(opts: RelayClientOptions): RelayHandle {
 			log('relay.stopped', {});
 		},
 	};
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function hasTopLevelRuntimeMetadata(message: Record<string, unknown>): boolean {
+	const containsReserved = (value: unknown): boolean => isRecord(value) &&
+		(Object.prototype.hasOwnProperty.call(value, 'privosAuthorization') ||
+			Object.prototype.hasOwnProperty.call(value, 'privosUser'));
+	return containsReserved(message._meta) ||
+		containsReserved(message.meta) ||
+		Object.prototype.hasOwnProperty.call(message, 'privosAuthorization') ||
+		Object.prototype.hasOwnProperty.call(message, 'privosUser');
+}
+
+function dispatchAuthorizationError(message: Record<string, unknown>) {
+	const id = Object.prototype.hasOwnProperty.call(message, 'id') &&
+		(typeof message.id === 'string' || typeof message.id === 'number' || message.id === null)
+		? message.id
+		: null;
+	return errorResponse(id, jsonRpcError(INVALID_REQUEST, 'Authenticated private dispatch required', {
+		code: 'DISPATCH_ASSERTION_INVALID',
+	}));
 }

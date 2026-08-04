@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "kind": "mcp-app",
   "name": "{{APP_ID}}",
   "version": "1.0.0",
@@ -8,7 +8,16 @@
   "author": {
     "name": "Developer"
   },
-  "scopes": [],
+  "permissions": [
+    {
+      "scope": "basic:information",
+      "requirement": "required",
+      "context": "workspace",
+      "executionContext": "user",
+      "feature": "dashboard.core",
+      "reason": "Identify the active PrivOS installation."
+    }
+  ],
   "tools": [
     {
       "name": "{{APP_NAME}}_dashboard",
@@ -28,6 +37,7 @@
     }
   ],
   "port": 3001,
+  "runtimeTrustProvisioningUrl": "https://your-app.example.com/.well-known/privos/runtime-trust/v3",
   "resources": {
     "memoryMb": 512,
     "cpus": 0.5,

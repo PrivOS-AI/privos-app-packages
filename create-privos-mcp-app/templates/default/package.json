@@ -10,7 +10,7 @@
     "build": "vite build && tsc -p tsconfig.server.json"
   },
   "dependencies": {
-    "@privos_ai/app-server": "^0.1.0",
+    "@privos_ai/app-server": "0.3.0",
     "express": "^4.18.0"
   },
   "devDependencies": {
