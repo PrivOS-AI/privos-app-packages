@@ -2,7 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { lintManifestV2 } from './manifest-tools.js';
+import { lintManifest } from './manifest-tools.js';
 
 const manifestPath = path.resolve(process.argv[2] || 'privos-app.json');
 let manifest: unknown;
@@ -13,6 +13,6 @@ try {
 	process.exit(1);
 }
 
-const result = lintManifestV2(manifest);
+const result = lintManifest(manifest);
 console.log(JSON.stringify({ manifestPath, ...result }, null, 2));
 if (!result.valid) process.exit(1);

@@ -177,7 +177,9 @@ export type {
 export {
 	canonicalJson,
 	canonicalJsonValue,
+	lintManifest,
 	lintManifestV2,
 	sha256CanonicalJson,
+	SUPPORTED_MANIFEST_SCHEMA_VERSIONS,
 } from './manifest-tools.js';
 export type { ManifestLintResult } from './manifest-tools.js';

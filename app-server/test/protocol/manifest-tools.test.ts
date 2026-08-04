@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { canonicalJson, lintManifestV2, sha256CanonicalJson } from '../../src/manifest-tools.js';
+import { canonicalJson, lintManifest, lintManifestV2, sha256CanonicalJson } from '../../src/manifest-tools.js';
 
 const manifest = {
 	schemaVersion: 2,
@@ -35,5 +35,49 @@ describe('manifest v2 tooling', () => {
 		expect(lintManifestV2({ ...manifest, schemaVersion: 1, scopes: ['basic:information'] })).toMatchObject({ valid: false });
 		expect(lintManifestV2({ ...manifest, permissions: [...manifest.permissions, { ...manifest.permissions[0], scope: 'lists:read' }] }).errors)
 			.toContain('permission feature identifiers must be unique');
+	});
+});
+
+const lifecycleManifest = {
+	...manifest,
+	schemaVersion: 3,
+	resourceManifestTemplate: [
+		{
+			resourceClass: 'reports-export-bucket',
+			dataClass: 'PUBLISHER_EXTERNAL',
+			ownershipScope: 'INSTALLATION_GENERATION',
+			resourceKey: 'exports/generation',
+			expectedCount: 1,
+			purgeAdapter: 'reports.exports.purge',
+			absenceAdapter: 'reports.exports.absence',
+		},
+	],
+};
+
+describe('manifest v3 tooling', () => {
+	it('accepts a lifecycle manifest and keeps the v2 linter pinned', () => {
+		expect(lintManifest(lifecycleManifest)).toMatchObject({ valid: true });
+		expect(lintManifest({ ...lifecycleManifest, resourceManifestTemplate: [] })).toMatchObject({ valid: true });
+		expect(lintManifest(manifest)).toMatchObject({ valid: true });
+		expect(lintManifestV2(lifecycleManifest).errors).toContain('schemaVersion must be 2');
+	});
+
+	it('rejects reserved namespaces, duplicates, and malformed template entries', () => {
+		const [entry] = lifecycleManifest.resourceManifestTemplate;
+		expect(lintManifest({ ...lifecycleManifest, resourceManifestTemplate: [{ ...entry, resourceClass: 'privos-forged' }] }).errors)
+			.toContain('resourceManifestTemplate[0] uses a reserved PrivOS resource namespace');
+		expect(lintManifest({ ...lifecycleManifest, resourceManifestTemplate: [{ ...entry, resourceKey: 'privos/system/forged' }] }).errors)
+			.toContain('resourceManifestTemplate[0] uses a reserved PrivOS resource namespace');
+		expect(lintManifest({ ...lifecycleManifest, resourceManifestTemplate: [entry, entry] }).errors)
+			.toContain('resourceManifestTemplate[1] duplicates an earlier resource identity');
+		expect(lintManifest({ ...lifecycleManifest, resourceManifestTemplate: [{ ...entry, dataClass: 'OTHER', expectedCount: -1 }] }))
+			.toMatchObject({ valid: false });
+		expect(lintManifest({ ...manifest, resourceManifestTemplate: [] }).errors)
+			.toContain('resourceManifestTemplate requires schemaVersion 3');
+	});
+
+	it('binds the permission declaration hash to the declared schema version', () => {
+		expect(lintManifest(lifecycleManifest).publisherPermissionDeclarationHash)
+			.not.toBe(lintManifest(manifest).publisherPermissionDeclarationHash);
 	});
 });
