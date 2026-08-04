@@ -660,6 +660,157 @@ function canonical(value: unknown): string {
 	return JSON.stringify(canonicalize(value));
 }
 
+const CLUSTER_DISPATCH_V3_COMMON_KEYS = [
+	'aud',
+	'authorizationContext',
+	'bodyDigest',
+	'clusterAppId',
+	'clusterId',
+	'deploymentId',
+	'exp',
+	'generationId',
+	'generationNumber',
+	'htm',
+	'htu',
+	'iat',
+	'iss',
+	'jti',
+	'manifestDigest',
+	'mcpAppId',
+	'nonce',
+	'protocolVersion',
+	'resourceManifestHash',
+	'runtimeApprovalReceiptHash',
+	'runtimeGrantEpoch',
+	'runtimeInstallationId',
+	'runtimeResourceInventoryHash',
+	'type',
+	'workspaceId',
+] as const;
+
+const CLUSTER_DISPATCH_V3_ROOM_KEYS = [
+	...CLUSTER_DISPATCH_V3_COMMON_KEYS,
+	'authorizationBindingId',
+	'bindingEpoch',
+	'bindingReceiptHash',
+	'roomId',
+] as const;
+
+export type VerifiedClusterDispatchAssertionV3 = Readonly<{
+	jti: string;
+	issuedAt: number;
+	expiresAt: number;
+	authorizationContext: 'workspace' | 'room';
+	roomId?: string;
+	authorizationBindingId?: string;
+}>;
+
+/**
+ * Verify the dispatch a Hub routes to an App Library runtime through its
+ * cluster. The assertion reuses the replica `typ` but carries generation
+ * affinity instead of replica affinity, so every field is checked against the
+ * generation the node attested — the runtime trusts no claim the broker did
+ * not already bind it to.
+ */
+export function verifyClusterDispatchAssertionV3(input: {
+	compact: string;
+	body: unknown;
+	context: WorkloadBrokerContext;
+	now?: number;
+}): VerifiedClusterDispatchAssertionV3 {
+	const generation = input.context.binding.generation;
+	if (!generation) throw new Error('dispatch_assertion_invalid');
+	const parts = input.compact.split('.');
+	if (parts.length !== 3) throw new Error('dispatch_assertion_invalid');
+	let header: Record<string, unknown>;
+	let payload: Record<string, unknown>;
+	try {
+		header = JSON.parse(Buffer.from(parts[0]!, 'base64url').toString('utf8')) as Record<string, unknown>;
+		payload = JSON.parse(Buffer.from(parts[1]!, 'base64url').toString('utf8')) as Record<string, unknown>;
+	} catch {
+		throw new Error('dispatch_assertion_invalid');
+	}
+	if (
+		!isRecord(header) ||
+		!isRecord(payload) ||
+		!exactKeys(header, RUNTIME_DISPATCH_V3_HEADER_KEYS) ||
+		header.alg !== 'ES256' ||
+		header.typ !== 'privos-hub-dispatch+jws' ||
+		header.privos_protocol !== 3 ||
+		header.kid !== input.context.hubKid
+	) {
+		throw new Error('dispatch_assertion_invalid');
+	}
+	const key = crypto.createPublicKey({ key: input.context.hubPublicJwk, format: 'jwk' });
+	if (!crypto.verify(
+		'sha256',
+		Buffer.from(`${parts[0]}.${parts[1]}`, 'utf8'),
+		{ key, dsaEncoding: 'ieee-p1363' },
+		Buffer.from(parts[2]!, 'base64url'),
+	)) throw new Error('dispatch_assertion_invalid');
+	const now = input.now ?? Math.floor(Date.now() / 1000);
+	const room = payload.authorizationContext === 'room';
+	if (
+		!exactKeys(payload, room ? CLUSTER_DISPATCH_V3_ROOM_KEYS : CLUSTER_DISPATCH_V3_COMMON_KEYS) ||
+		payload.protocolVersion !== 3 ||
+		payload.type !== 'hub-dispatch-assertion' ||
+		payload.aud !== 'privos-mcp-app' ||
+		payload.htm !== 'POST' ||
+		payload.htu !== '/mcp' ||
+		typeof payload.jti !== 'string' ||
+		typeof payload.iss !== 'string' ||
+		typeof payload.nonce !== 'string' ||
+		!Number.isInteger(payload.iat) ||
+		!Number.isInteger(payload.exp) ||
+		Number(payload.iat) > now + 5 ||
+		Number(payload.exp) < now ||
+		Number(payload.exp) - Number(payload.iat) > 30
+	) {
+		throw new Error('dispatch_assertion_invalid');
+	}
+	if (
+		payload.workspaceId !== input.context.binding.workspaceId ||
+		payload.runtimeInstallationId !== input.context.binding.installationId ||
+		payload.mcpAppId !== input.context.binding.mcpAppId ||
+		payload.runtimeApprovalReceiptHash !== input.context.binding.receiptHash ||
+		payload.runtimeGrantEpoch !== input.context.binding.grantEpoch ||
+		payload.clusterId !== generation.clusterId ||
+		payload.deploymentId !== generation.deploymentId ||
+		payload.generationId !== generation.generationId ||
+		payload.generationNumber !== generation.generationNumber ||
+		payload.manifestDigest !== generation.manifestDigest ||
+		payload.resourceManifestHash !== generation.resourceManifestHash ||
+		payload.runtimeResourceInventoryHash !== generation.runtimeResourceInventoryHash ||
+		typeof payload.clusterAppId !== 'string' ||
+		payload.clusterAppId.length === 0 ||
+		payload.bodyDigest !== sha256RuntimeDispatchBodyV3(input.body)
+	) {
+		throw new Error('dispatch_assertion_binding_mismatch');
+	}
+	if (room && (
+		typeof payload.roomId !== 'string' ||
+		payload.roomId.length === 0 ||
+		typeof payload.authorizationBindingId !== 'string' ||
+		payload.authorizationBindingId.length === 0 ||
+		typeof payload.bindingReceiptHash !== 'string' ||
+		!Number.isInteger(payload.bindingEpoch) ||
+		Number(payload.bindingEpoch) < 1
+	)) {
+		throw new Error('dispatch_assertion_binding_mismatch');
+	}
+	if (!room && payload.authorizationContext !== 'workspace') throw new Error('dispatch_assertion_invalid');
+	for (const [jti, exp] of replay) if (exp < now) replay.delete(jti);
+	if (replay.has(payload.jti)) throw new Error('dispatch_assertion_replayed');
+	replay.set(payload.jti, Number(payload.exp));
+	return Object.freeze({
+		jti: payload.jti,
+		issuedAt: Number(payload.iat),
+		expiresAt: Number(payload.exp),
+		authorizationContext: room ? 'room' : 'workspace',
+		...(room ? { roomId: String(payload.roomId), authorizationBindingId: String(payload.authorizationBindingId) } : {}),
+	});
+}
+
 export function verifyDispatchAssertion(input: {
 	compact: string;
 	body: unknown;

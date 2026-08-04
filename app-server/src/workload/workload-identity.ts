@@ -12,6 +12,20 @@ export type WorkloadBrokerResponse = {
 	hubPublicJwk: JsonWebKey;
 };
 
+/**
+ * Generation-scoped facts a node attests for an App Library runtime. They are
+ * the affinity a cluster-routed dispatch assertion is checked against.
+ */
+export type WorkloadGenerationBinding = {
+	clusterId: string;
+	deploymentId: string;
+	generationId: string;
+	generationNumber: number;
+	manifestDigest: string;
+	resourceManifestHash: string;
+	runtimeResourceInventoryHash: string;
+};
+
 export type WorkloadBinding = {
 	workspaceId: string;
 	installationId: string;
@@ -19,6 +33,8 @@ export type WorkloadBinding = {
 	replicaId: string;
 	receiptHash: string;
 	grantEpoch: number;
+	/** Present only when the node attested an App Library generation. */
+	generation?: WorkloadGenerationBinding;
 };
 
 export type WorkloadBrokerContext = {
@@ -132,7 +148,6 @@ function parseBinding(attestation: string, nonce: string, publicJwk: JsonWebKey,
 	} catch {
 		throw new WorkloadIdentityError('BROKER_RESPONSE_INVALID', 'The workload broker response is invalid.');
 	}
-	const fields = ['workspaceId', 'installationId', 'mcpAppId', 'replicaId'] as const;
 	if (
 		payload.type !== 'node-workload-attestation' ||
 		payload.nonce !== nonce ||
@@ -141,8 +156,66 @@ function parseBinding(attestation: string, nonce: string, publicJwk: JsonWebKey,
 		!Number.isInteger(payload.exp) ||
 		Number(payload.iat) > Math.floor(now / 1_000) + 30 ||
 		Number(payload.exp) < Math.floor(now / 1_000) ||
-		Number(payload.exp) - Number(payload.iat) > 60 ||
-		fields.some((field) => typeof payload[field] !== 'string' || String(payload[field]).length === 0) ||
+		Number(payload.exp) - Number(payload.iat) > 60
+	) {
+		throw new WorkloadIdentityError('BROKER_RESPONSE_INVALID', 'The workload broker response is invalid.');
+	}
+	return payload.protocolVersion === 3 ? bindingFromGenerationAttestation(payload) : bindingFromReplicaAttestation(payload);
+}
+
+/**
+ * A node running an App Library generation attests the generation instead of a
+ * standalone replica: the installation is the runtime installation, the receipt
+ * is the approval receipt, and the epoch is the authorization epoch. All three
+ * generation hashes are canonical-JSON SHA-256 in base64url, never the
+ * `sha256:<hex>` digest form the replica attestation uses.
+ */
+function bindingFromGenerationAttestation(payload: Record<string, unknown>): WorkloadBinding {
+	const identifiers = [
+		'workspaceId',
+		'runtimeInstallationId',
+		'mcpAppId',
+		'replicaId',
+		'clusterId',
+		'deploymentId',
+		'generationId',
+	] as const;
+	const artifactHashes = ['approvalReceiptHash', 'resourceManifestHash', 'runtimeResourceInventoryHash'] as const;
+	if (
+		identifiers.some((field) => typeof payload[field] !== 'string' || String(payload[field]).length === 0) ||
+		artifactHashes.some((field) => typeof payload[field] !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(String(payload[field]))) ||
+		typeof payload.manifestDigest !== 'string' ||
+		!/^sha256:[a-f0-9]{64}$/.test(payload.manifestDigest) ||
+		!Number.isInteger(payload.authorizationEpoch) ||
+		Number(payload.authorizationEpoch) < 1 ||
+		!Number.isInteger(payload.generationNumber) ||
+		Number(payload.generationNumber) < 1
+	) {
+		throw new WorkloadIdentityError('BROKER_RESPONSE_INVALID', 'The workload broker response is invalid.');
+	}
+	return {
+		workspaceId: String(payload.workspaceId),
+		installationId: String(payload.runtimeInstallationId),
+		mcpAppId: String(payload.mcpAppId),
+		replicaId: String(payload.replicaId),
+		receiptHash: String(payload.approvalReceiptHash),
+		grantEpoch: Number(payload.authorizationEpoch),
+		generation: {
+			clusterId: String(payload.clusterId),
+			deploymentId: String(payload.deploymentId),
+			generationId: String(payload.generationId),
+			generationNumber: Number(payload.generationNumber),
+			manifestDigest: payload.manifestDigest,
+			resourceManifestHash: String(payload.resourceManifestHash),
+			runtimeResourceInventoryHash: String(payload.runtimeResourceInventoryHash),
+		},
+	};
+}
+
+function bindingFromReplicaAttestation(payload: Record<string, unknown>): WorkloadBinding {
+	const identifiers = ['workspaceId', 'installationId', 'mcpAppId', 'replicaId'] as const;
+	if (
+		identifiers.some((field) => typeof payload[field] !== 'string' || String(payload[field]).length === 0) ||
 		typeof payload.receiptHash !== 'string' ||
 		!/^sha256:[a-f0-9]{64}$/.test(payload.receiptHash) ||
 		!Number.isInteger(payload.grantEpoch) ||

@@ -57,6 +57,56 @@ const binding = (): WorkloadBinding => ({
 	grantEpoch: 1,
 });
 
+const APPROVAL_RECEIPT_HASH = 'a'.repeat(43);
+
+/** Mirrors the attestation a cluster node issues for an App Library generation. */
+function generationBrokerFactory(override: Record<string, unknown> = {}) {
+	const hub = hubIdentity();
+	return async (request: Record<string, unknown>): Promise<WorkloadBrokerResponse> => {
+		const publicJwk = request.publicJwk as JsonWebKey;
+		const iat = Math.floor(Date.now() / 1_000);
+		const payload = {
+			protocolVersion: 3,
+			type: 'node-workload-attestation',
+			iss: 'urn:privos:cluster-node:cluster-1:node-1',
+			aud: 'privos-hub-api',
+			iat,
+			exp: iat + 45,
+			jti: crypto.randomUUID(),
+			clusterId: 'cluster-1',
+			nodeId: 'node-1',
+			workspaceId: 'workspace-1',
+			deploymentId: 'deployment-1',
+			generationId: 'generation-1',
+			generationNumber: 2,
+			runtimeInstallationId: 'runtime-installation-1',
+			mcpAppId: 'app-1',
+			replicaId: 'replica-1',
+			containerId: 'container-1',
+			imageDigest: `sha256:${'b'.repeat(64)}`,
+			manifestDigest: `sha256:${'c'.repeat(64)}`,
+			approvalReceiptHash: APPROVAL_RECEIPT_HASH,
+			authorizationEpoch: 7,
+			resourceManifestHash: 'd'.repeat(43),
+			runtimeResourceInventoryHash: 'e'.repeat(43),
+			dpopJkt: crypto
+				.createHash('sha256')
+				.update(JSON.stringify({ crv: publicJwk.crv, kty: publicJwk.kty, x: publicJwk.x, y: publicJwk.y }))
+				.digest('base64url'),
+			nonce: request.nonce,
+			...override,
+		};
+		for (const [key, value] of Object.entries(override)) if (value === undefined) delete (payload as Record<string, unknown>)[key];
+		return {
+			ok: true,
+			attestation: `e30.${Buffer.from(JSON.stringify(payload)).toString('base64url')}.c2ln`,
+			hubOrigin: 'https://hub.example',
+			hubKid: hub.kid,
+			hubPublicJwk: hub.publicJwk,
+		};
+	};
+}
+
 function jsonResponse(body: unknown, status = 200): Response {
 	return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 }
@@ -157,5 +207,35 @@ describe('WorkloadIdentityClient', () => {
 		const error = new WorkloadPermissionDeniedError('files:write');
 		expect(error).toMatchObject({ code: 'PERMISSION_DENIED', status: 403, requiredScope: 'files:write' });
 		expect(error.message).not.toContain('token');
+	});
+
+	it('pairs against a node that attests an App Library generation', async () => {
+		const fetchMock = vi.fn(async (request: string | URL | Request) => String(request).endsWith('mcp-workload.ready')
+			? jsonResponse({ status: 'active' })
+			: jsonResponse({ access_token: `token-${'x'.repeat(32)}`, token_type: 'DPoP', expires_in: 300, scope: 'basic:information' }));
+		const client = new WorkloadIdentityClient({ brokerRequest: generationBrokerFactory(), fetch: fetchMock });
+
+		await expect(client.getEffectiveCapabilities()).resolves.toMatchObject({
+			status: 'active',
+			installationId: 'runtime-installation-1',
+			receiptHash: APPROVAL_RECEIPT_HASH,
+			grantEpoch: 7,
+			workspaceId: 'workspace-1',
+			mcpAppId: 'app-1',
+			replicaId: 'replica-1',
+		});
+	});
+
+	it.each([
+		['a digest-form approval receipt', { approvalReceiptHash: `sha256:${'a'.repeat(64)}` }],
+		['a zero authorization epoch', { authorizationEpoch: 0 }],
+		['a replica-shaped installation field', { runtimeInstallationId: undefined, installationId: 'installation-1' }],
+	])('refuses a generation attestation with %s', async (_case, override) => {
+		const client = new WorkloadIdentityClient({
+			brokerRequest: generationBrokerFactory(override),
+			fetch: vi.fn(async () => jsonResponse({ status: 'active' })),
+		});
+
+		await expect(client.getEffectiveCapabilities()).rejects.toMatchObject({ code: 'BROKER_RESPONSE_INVALID' });
 	});
 });

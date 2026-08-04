@@ -8,6 +8,7 @@ export {
 export type {
 	EffectiveCapabilities,
 	WorkloadBinding,
+	WorkloadGenerationBinding,
 	WorkloadBrokerContext,
 	WorkloadBrokerResponse,
 	WorkloadFetchInit,
@@ -23,6 +24,7 @@ export {
 	isUnsignedRuntimeReadinessRpcV3,
 	parseRuntimeDispatchTrustV3Json,
 	sha256RuntimeDispatchBodyV3,
+	verifyClusterDispatchAssertionV3,
 	verifyDispatchAssertion,
 	verifyRuntimeDispatchAssertionV3,
 } from './dispatch-assertion.js';
@@ -37,6 +39,7 @@ export type {
 	RuntimeDispatchTrustHintV3,
 	RuntimeDispatchTrustResolverV3,
 	RuntimeDispatchTrustV3,
+	VerifiedClusterDispatchAssertionV3,
 	VerifiedDispatchActor,
 	VerifiedDispatchAssertion,
 	VerifiedRuntimeDispatchAssertionV3,

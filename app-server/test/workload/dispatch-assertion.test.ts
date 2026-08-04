@@ -9,6 +9,7 @@ import {
 	isUnsignedRuntimeReadinessRpcV3,
 	parseRuntimeDispatchTrustV3Json,
 	sha256RuntimeDispatchBodyV3,
+	verifyClusterDispatchAssertionV3,
 	verifyDispatchAssertion,
 	verifyRuntimeDispatchAssertionV3,
 	type RuntimeDispatchSecurityV3,
@@ -115,6 +116,164 @@ describe('workload dispatch assertions', () => {
 		});
 		expect(() => verifyDispatchAssertion({ compact, body, context, now })).toThrow('dispatch_assertion_replayed');
 		expect(() => verifyDispatchAssertion({ compact: compact.replace(/.$/, 'A'), body, context, now })).toThrow();
+	});
+});
+
+const CLUSTER_V3_NOW = 2_100_000_000;
+const CLUSTER_V3_BODY = { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'hr_management_dashboard' } };
+
+/** Signs exactly what a Hub routes through a cluster to an App Library runtime. */
+function clusterDispatchV3(overrides: { payload?: Record<string, unknown>; header?: Record<string, unknown> } = {}) {
+	const pair = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
+	const privateJwk = pair.privateKey.export({ format: 'jwk' });
+	const publicJwk = pair.publicKey.export({ format: 'jwk' });
+	const kid = crypto
+		.createHash('sha256')
+		.update(JSON.stringify({ crv: publicJwk.crv, kty: publicJwk.kty, x: publicJwk.x, y: publicJwk.y }))
+		.digest('base64url');
+	const generation = {
+		clusterId: 'cluster-1',
+		deploymentId: 'deployment-1',
+		generationId: 'generation-1',
+		generationNumber: 3,
+		manifestDigest: `sha256:${'a'.repeat(64)}`,
+		resourceManifestHash: 'B'.repeat(43),
+		runtimeResourceInventoryHash: 'C'.repeat(43),
+	};
+	const context: WorkloadBrokerContext = {
+		hubOrigin: 'https://hub.example',
+		hubKid: kid,
+		hubPublicJwk: publicJwk,
+		binding: {
+			workspaceId: 'workspace-1',
+			installationId: 'runtime-installation-1',
+			mcpAppId: 'mcp-app-1',
+			replicaId: 'replica-1',
+			receiptHash: 'D'.repeat(43),
+			grantEpoch: 5,
+			generation,
+		},
+	};
+	const payload = {
+		protocolVersion: 3,
+		type: 'hub-dispatch-assertion',
+		iss: 'urn:privos:hub:deployment-1',
+		aud: 'privos-mcp-app',
+		jti: crypto.randomUUID(),
+		nonce: 'E'.repeat(32),
+		iat: CLUSTER_V3_NOW,
+		exp: CLUSTER_V3_NOW + 30,
+		clusterId: generation.clusterId,
+		workspaceId: 'workspace-1',
+		deploymentId: generation.deploymentId,
+		generationId: generation.generationId,
+		generationNumber: generation.generationNumber,
+		runtimeInstallationId: 'runtime-installation-1',
+		mcpAppId: 'mcp-app-1',
+		clusterAppId: 'cluster-app-1',
+		htm: 'POST',
+		htu: '/mcp',
+		bodyDigest: sha256RuntimeDispatchBodyV3(CLUSTER_V3_BODY),
+		manifestDigest: generation.manifestDigest,
+		resourceManifestHash: generation.resourceManifestHash,
+		runtimeResourceInventoryHash: generation.runtimeResourceInventoryHash,
+		runtimeApprovalReceiptHash: 'D'.repeat(43),
+		runtimeGrantEpoch: 5,
+		authorizationContext: 'workspace',
+		...overrides.payload,
+	};
+	const header = { alg: 'ES256', kid, privos_protocol: 3, typ: 'privos-hub-dispatch+jws', ...overrides.header };
+	const encode = (value: unknown) =>
+		Buffer.from(JSON.stringify(Object.fromEntries(Object.entries(value as object).sort(([l], [r]) => (l < r ? -1 : 1))))).toString(
+			'base64url',
+		);
+	const encodedHeader = encode(header);
+	const encodedPayload = encode(payload);
+	const signature = crypto
+		.sign('sha256', Buffer.from(`${encodedHeader}.${encodedPayload}`, 'utf8'), {
+			key: crypto.createPrivateKey({ key: privateJwk, format: 'jwk' }),
+			dsaEncoding: 'ieee-p1363',
+		})
+		.toString('base64url');
+	return { compact: `${encodedHeader}.${encodedPayload}.${signature}`, context };
+}
+
+describe('cluster-routed App Library dispatch assertions', () => {
+	it('accepts a workspace dispatch bound to the attested generation', () => {
+		const { compact, context } = clusterDispatchV3();
+
+		expect(
+			verifyClusterDispatchAssertionV3({ compact, body: CLUSTER_V3_BODY, context, now: CLUSTER_V3_NOW }),
+		).toMatchObject({ authorizationContext: 'workspace' });
+	});
+
+	it('accepts a room dispatch and reports the room it was authorized for', () => {
+		const { compact, context } = clusterDispatchV3({
+			payload: {
+				authorizationContext: 'room',
+				roomId: 'room-1',
+				authorizationBindingId: 'binding-1',
+				bindingReceiptHash: 'F'.repeat(43),
+				bindingEpoch: 1,
+			},
+		});
+
+		expect(
+			verifyClusterDispatchAssertionV3({ compact, body: CLUSTER_V3_BODY, context, now: CLUSTER_V3_NOW }),
+		).toMatchObject({ authorizationContext: 'room', roomId: 'room-1', authorizationBindingId: 'binding-1' });
+	});
+
+	it('refuses a replay of the same assertion', () => {
+		const { compact, context } = clusterDispatchV3();
+		verifyClusterDispatchAssertionV3({ compact, body: CLUSTER_V3_BODY, context, now: CLUSTER_V3_NOW });
+
+		expect(() =>
+			verifyClusterDispatchAssertionV3({ compact, body: CLUSTER_V3_BODY, context, now: CLUSTER_V3_NOW }),
+		).toThrow('dispatch_assertion_replayed');
+	});
+
+	it('refuses a body the assertion did not cover', () => {
+		const { compact, context } = clusterDispatchV3();
+
+		expect(() =>
+			verifyClusterDispatchAssertionV3({
+				compact,
+				body: { ...CLUSTER_V3_BODY, params: { name: 'other_tool' } },
+				context,
+				now: CLUSTER_V3_NOW,
+			}),
+		).toThrow('dispatch_assertion_binding_mismatch');
+	});
+
+	it.each([
+		['another generation', { generationId: 'generation-2' }],
+		['a superseded grant epoch', { runtimeGrantEpoch: 4 }],
+		['another runtime installation', { runtimeInstallationId: 'runtime-installation-2' }],
+		['a different resource manifest', { resourceManifestHash: 'Z'.repeat(43) }],
+		['a different runtime inventory', { runtimeResourceInventoryHash: 'Z'.repeat(43) }],
+	])('refuses a dispatch bound to %s', (_case, override) => {
+		const { compact, context } = clusterDispatchV3({ payload: override });
+
+		expect(() =>
+			verifyClusterDispatchAssertionV3({ compact, body: CLUSTER_V3_BODY, context, now: CLUSTER_V3_NOW }),
+		).toThrow('dispatch_assertion_binding_mismatch');
+	});
+
+	it('refuses an assertion signed for the direct-dispatch transport', () => {
+		const { compact, context } = clusterDispatchV3({ header: { typ: 'privos-hub-runtime-dispatch+jws' } });
+
+		expect(() =>
+			verifyClusterDispatchAssertionV3({ compact, body: CLUSTER_V3_BODY, context, now: CLUSTER_V3_NOW }),
+		).toThrow('dispatch_assertion_invalid');
+	});
+
+	it('refuses any dispatch when the node attested a replica rather than a generation', () => {
+		const { compact, context } = clusterDispatchV3();
+		const replicaContext = { ...context, binding: { ...context.binding, generation: undefined } };
+
+		expect(() =>
+			verifyClusterDispatchAssertionV3({ compact, body: CLUSTER_V3_BODY, context: replicaContext, now: CLUSTER_V3_NOW }),
+		).toThrow('dispatch_assertion_invalid');
 	});
 });
 
