@@ -19,6 +19,8 @@ export type {
 	IdentityState,
 	ToolCallContext,
 } from './context/tool-call-context.js';
+export type { AppAccessMode, PlatformContext } from './context/platform-context.js';
+export { getPlatformContext, publicUrlFor } from './context/platform-context.js';
 export type { IdentityEnforcementMode } from './context/identity-mode.js';
 export { parseIdentityEnforcementMode } from './context/identity-mode.js';
 export {
