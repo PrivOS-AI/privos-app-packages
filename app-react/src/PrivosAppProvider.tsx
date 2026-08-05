@@ -49,7 +49,29 @@ export interface McpApp {
 	rest(params: RestRequestParams): Promise<RestResponse>;
 	/** Upload a file to file management as the current user. */
 	uploadFile(params: UploadFileParams): Promise<any>;
+	/**
+	 * Declare that this app renders its own AI chat window. While it owns the surface the hub's
+	 * floating launcher opens the app's chat instead of the hub's. `supported` is false on host
+	 * surfaces that have no launcher to hand over (standalone page, sidebar panel) — draw your
+	 * own entry point there. Ownership lasts for this iframe mount only.
+	 */
+	registerChatSurface(owns: boolean): Promise<{ ok: true; supported: boolean }>;
+	/**
+	 * Report that the app's own chat window opened or was minimized/closed. Reporting `false`
+	 * brings the hub launcher back. The host waits ~1.5s for a `true` after it asks the app to
+	 * open; miss that window and it takes the surface back.
+	 */
+	setChatOpen(open: boolean): Promise<{ ok: true }>;
 	onhostcontextchanged?: (ctx: any) => void;
+	/**
+	 * The host (re)initialized this iframe. Anything the host tracks per mount — notably chat
+	 * surface ownership — is cleared at this point and must be claimed again.
+	 */
+	onhostinitialize?: (() => void) | undefined;
+	/** The user clicked the hub launcher — open your chat window and report `setChatOpen(true)`. */
+	onhostchatopen?: (() => void) | undefined;
+	/** The host needs your chat closed (its tab went inactive, or it took the surface back). */
+	onhostchatclose?: ((reason: string) => void) | undefined;
 }
 
 /**
@@ -131,6 +153,10 @@ function createDefaultApp(): McpApp {
 	// let toolsCallTail: Promise<void> = Promise.resolve();
 	// ---------------------------------------------------------------------------
 
+	let initializeHandler: (() => void) | undefined;
+	let chatOpenHandler: (() => void) | undefined;
+	let chatCloseHandler: ((reason: string) => void) | undefined;
+
 	const handleMessage = (event: MessageEvent) => {
 			// Only trust the host bridge (parent frame). Rejecting other sources stops a
 			// sibling/nested frame from forging context/tool responses or injecting a token.
@@ -139,9 +165,22 @@ function createDefaultApp(): McpApp {
 		const data = event.data;
 		if (!data || data.jsonrpc !== '2.0') return;
 
+		// Host-initiated notifications carry no id. Unlike the initial context push these only
+		// ever follow a user action, so the listener registered by connect() is always in place.
+		if (data.id === undefined) {
+			try {
+				if (data.method === 'ui/initialize') initializeHandler?.();
+				else if (data.method === 'ui/chat.open') chatOpenHandler?.();
+				else if (data.method === 'ui/chat.close') chatCloseHandler?.(String(data.params?.reason ?? ''));
+			} catch {
+				/* never let a handler throw break the host bridge listener */
+			}
+			return;
+		}
+
 		// Handle responses to our tool calls. HOST_CONTEXT_CHANGED is handled by
 		// the module-scope early listener above and routed via `activeContextHandler`.
-		if (data.id !== undefined && pendingCalls.has(data.id)) {
+		if (pendingCalls.has(data.id)) {
 			const { resolve, reject } = pendingCalls.get(data.id)!;
 			pendingCalls.delete(data.id);
 			if (data.error) reject(new Error(data.error.message));
@@ -203,6 +242,21 @@ function createDefaultApp(): McpApp {
 		uploadFile(params) {
 			// Larger timeout — uploads can take a while.
 			return sendRequest('host/file.upload', params, 60000);
+		},
+		registerChatSurface(owns: boolean) {
+			return sendRequest('host/chat.register', { owns }, 5000);
+		},
+		setChatOpen(open: boolean) {
+			return sendRequest('host/chat.state', { open }, 5000);
+		},
+		set onhostinitialize(handler: (() => void) | undefined) {
+			initializeHandler = handler;
+		},
+		set onhostchatopen(handler: (() => void) | undefined) {
+			chatOpenHandler = handler;
+		},
+		set onhostchatclose(handler: ((reason: string) => void) | undefined) {
+			chatCloseHandler = handler;
 		},
 		set onhostcontextchanged(handler: ((ctx: any) => void) | undefined) {
 			activeContextHandler = handler;

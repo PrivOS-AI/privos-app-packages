@@ -13,5 +13,7 @@ export { usePrivosTool } from './use-privos-tool';
 export { useLists } from './hooks/use-lists';
 export { useFiles } from './hooks/use-files';
 export { useRoom } from './hooks/use-room';
+export { useAppChatSurface } from './hooks/use-app-chat-surface';
+export type { UseAppChatSurfaceOptions, UseAppChatSurfaceResult } from './hooks/use-app-chat-surface';
 
 export { parseToolResult } from './parse-tool-result';

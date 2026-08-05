@@ -54,6 +54,45 @@ export default function App() {
 | `useLists(roomId)` | `{ data, loading, error }` | Lists in room |
 | `useFiles(roomId)` | `{ data, loading, error }` | Files in room |
 | `useRoom(roomId?)` | `{ data, loading, error }` | Room metadata |
+| `useAppChatSurface(opts)` | `{ supported, isOpen, open, close }` | Render your own AI chat window instead of the hub's |
+
+## Owning the AI chat surface
+
+By default the hub renders its own AI chat and your app can only steer it. If your app ships
+its own chat design, `useAppChatSurface` claims the surface: clicking the hub's floating
+launcher then opens *your* chat window and the launcher hides until you close it.
+
+```tsx
+const { resolved, supported, close } = useAppChatSurface({
+  onOpen: () => setChatVisible(true),
+  onClose: () => setChatVisible(false),
+});
+
+// Wire your minimize button to close() so the hub launcher comes back.
+<button onClick={close}>Minimize</button>
+
+// `supported` is false where the host has no launcher to hand over (standalone /app/:appId
+// page, sidebar panel) — render your own entry point there. Wait for `resolved`: before the
+// host answers, `supported` is still false and you would paint a second launcher next to the
+// hub's own. Call open() too, so the host knows to hide its launcher if it has one.
+{resolved && !supported && (
+  <button onClick={() => { setChatVisible(true); open(); }}>Ask AI</button>
+)}
+```
+
+Rules worth knowing:
+
+- **Per mount.** Ownership is dropped on iframe reload, tab switch, and unmount. Nothing is
+  persisted and no manifest field is involved. The hook re-claims automatically when the host
+  reinitializes the iframe, so you do not have to handle the reload case yourself.
+- **Acknowledge quickly.** The host waits ~1.5s after `ui/chat.open` for the app to confirm.
+  The hook acks for you; if you drive the bridge by hand, call `setChatOpen(true)` promptly or
+  the host takes the surface back, restores its own launcher, and sends you
+  `ui/chat.close { reason: 'timeout' }`.
+- **Wire your minimize button to `close()`** so the hub launcher reappears.
+- **One consumer per app.** The underlying handlers are single-slot: mounting `useAppChatSurface`
+  twice means the second instance wins and unmounting it withdraws ownership for both.
+- The AI backend is unchanged — your chat window still reaches the hub AI through the bridge.
 
 ## User-delegated identity
 
