@@ -90,6 +90,8 @@ export type DispatchOutcome =
 	| { type: 'no_response'; reason: 'notification' | 'missing_request_id' | 'ignored_response' }
 	| { type: 'protocol_warning'; warning: string; response?: McpResponse };
 
+type ContextFinalizer = (context: ToolCallContext) => void;
+
 const DEFAULT_MAX_IN_FLIGHT = 32;
 const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
 const DEFAULT_MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
@@ -250,6 +252,7 @@ export class AppServerRuntime {
 	async dispatchParsed(
 		parsed: ParsedInbound,
 		context: ToolCallContext,
+		finalizeContext?: ContextFinalizer,
 	): Promise<DispatchOutcome> {
 		if (parsed.kind === 'response') {
 			return { type: 'no_response', reason: 'ignored_response' };
@@ -337,6 +340,7 @@ export class AppServerRuntime {
 			...context,
 			signal: abort.signal,
 		};
+		finalizeContext?.(requestContext);
 
 		// Keep in-flight until the underlying handler settles (even after timeout response).
 		const work = this.handleRequest(
@@ -402,15 +406,17 @@ export class AppServerRuntime {
 	async dispatchObject(
 		raw: unknown,
 		context: ToolCallContext,
+		finalizeContext?: ContextFinalizer,
 	): Promise<DispatchOutcome> {
-		return this.dispatchParsed(parseJsonRpcMessage(raw), context);
+		return this.dispatchParsed(parseJsonRpcMessage(raw), context, finalizeContext);
 	}
 
 	async dispatchText(
 		text: string,
 		context: ToolCallContext,
+		finalizeContext?: ContextFinalizer,
 	): Promise<DispatchOutcome> {
-		return this.dispatchParsed(parseJsonText(text), context);
+		return this.dispatchParsed(parseJsonText(text), context, finalizeContext);
 	}
 
 	private async handleRequest(

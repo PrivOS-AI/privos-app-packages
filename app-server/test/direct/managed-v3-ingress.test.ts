@@ -5,7 +5,7 @@ import type { AddressInfo } from 'node:net';
 import express from 'express';
 import { exportJWK, generateKeyPair, SignJWT } from 'jose';
 import request from 'supertest';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import type { AppDescriptor } from '../../src/app-descriptor.js';
 import { createDirectRouter } from '../../src/direct/express-router.js';
@@ -60,8 +60,9 @@ function signEs256(header: Record<string, unknown>, payload: Record<string, unkn
 	return `${encodedHeader}.${encodedPayload}.${signature}`;
 }
 
-function workloadClient(): WorkloadIdentityClient {
+function workloadClient(fetchImplementation?: typeof fetch): WorkloadIdentityClient {
 	return new WorkloadIdentityClient({
+		...(fetchImplementation ? { fetch: fetchImplementation } : {}),
 		brokerRequest: async (requestBody: Record<string, unknown>): Promise<WorkloadBrokerResponse> => {
 			const publicJwk = requestBody.publicJwk as JsonWebKey;
 			const dpopJkt = crypto.createHash('sha256').update(canonical({
@@ -169,12 +170,12 @@ async function actorToken(overrides: { audience?: string; issuer?: string; roomI
 		.sign(actorPrivateKey);
 }
 
-function appHarness(seen: ToolCallContext[]) {
+function appHarness(seen: ToolCallContext[], client = workloadClient()) {
 	const app = express();
 	app.use(createDirectRouter({
 		descriptor,
 		workloadSecurity: 'required',
-		workloadIdentityClient: workloadClient(),
+		workloadIdentityClient: client,
 		auth: {
 			jwksUrl: 'https://attacker.invalid/jwks',
 			audience: 'wrong-audience',
@@ -192,7 +193,8 @@ function appHarness(seen: ToolCallContext[]) {
 describe('managed Cluster v3 canonical Direct ingress', () => {
 	it('selects the managed header from broker generation and joins the separate actor to the immutable room authorization', async () => {
 		const seen: ToolCallContext[] = [];
-		const app = appHarness(seen);
+		const client = workloadClient();
+		const app = appHarness(seen, client);
 		const body = { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} };
 		await request(app).post('/mcp')
 			.set('X-PrivOS-Dispatch-Assertion', dispatchAssertion(body))
@@ -209,6 +211,48 @@ describe('managed Cluster v3 canonical Direct ingress', () => {
 		});
 		expect(Object.isFrozen(seen[0]!.runtimeAuthorization)).toBe(true);
 		expect(Object.isFrozen(seen[0]!.actor)).toBe(true);
+		expect(Object.isFrozen(seen[0]!.actor!.claims)).toBe(true);
+		expect(Object.isFrozen(seen[0])).toBe(true);
+		expect((client.forRoom(seen[0]!) as any).getAccessToken).toBeUndefined();
+	});
+
+	it('accepts only the exact owning-client context capability minted by managed ingress', async () => {
+		const seen: ToolCallContext[] = [];
+		const fetchMock = vi.fn<typeof fetch>();
+		const client = workloadClient(fetchMock);
+		const body = { jsonrpc: '2.0', id: 4, method: 'tools/list', params: {} };
+		await request(appHarness(seen, client)).post('/mcp')
+			.set('X-PrivOS-Dispatch-Assertion', dispatchAssertion(body))
+			.set('Authorization', `Bearer ${await actorToken()}`)
+			.set('X-MCP-User-Id', 'user-1')
+			.send(body)
+			.expect(200);
+		const authentic = seen[0]!;
+		const fabricated = Object.fromEntries(Object.entries(authentic)) as unknown as ToolCallContext;
+		const deepEqual = structuredClone(authentic);
+		const spreadClone = { ...authentic };
+		const prototypeCopy = Object.assign(Object.create(Object.getPrototypeOf(authentic)), authentic) as ToolCallContext;
+		const substituted = {
+			...authentic,
+			runtimeAuthorization: Object.freeze({
+				...authentic.runtimeAuthorization!,
+				authorizationBindingId: 'binding-2',
+				bindingReceiptHash: 'F'.repeat(43),
+			}),
+		};
+
+		expect(() => client.forRoom(authentic)).not.toThrow();
+		for (const candidate of [fabricated, deepEqual, spreadClone, prototypeCopy, substituted]) {
+			expect(() => client.forRoom(candidate as ToolCallContext)).toThrowError(/authentic managed-ingress room context/i);
+		}
+		expect(() => workloadClient().forRoom(authentic)).toThrowError(/authentic managed-ingress room context/i);
+		expect(Reflect.set(authentic.runtimeAuthorization!, 'authorizationBindingId', 'binding-2')).toBe(false);
+		expect(
+			authentic.runtimeAuthorization && 'authorizationBindingId' in authentic.runtimeAuthorization
+				? authentic.runtimeAuthorization.authorizationBindingId
+				: undefined,
+		).toBe('binding-1');
+		expect(fetchMock).not.toHaveBeenCalled();
 	});
 
 	it('fails closed before the handler for missing, substituted, or ambiguous caller authority', async () => {

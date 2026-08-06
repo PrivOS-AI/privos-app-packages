@@ -264,6 +264,9 @@ descriptor app id. Publisher-hosted and self-hosted-local v3 runtimes continue
 to use only `X-PrivOS-MCP-Dispatch-Assertion`. Sending both headers, duplicating
 either header, or supplying a room assertion without one matching verified
 human credential is denied before the handler runs.
+Successful managed room ingress also freezes the exact handler context and
+registers a client-private, object-identity capability for it. Public context
+fields are descriptive only and cannot be reconstructed into room authority.
 
 For backend calls that must retain the verified room child-binding, derive a
 request-only client from the tool context:
@@ -276,14 +279,21 @@ const response = await roomHub.authorizedRequest('/api/v1/example.read', {
 });
 ```
 
-`forRoom` is synchronous and rejects workspace authorization, a missing actor,
-or any actor/context/assertion room mismatch. Its client accepts only
-Hub-relative paths and one exact scope, sends the verified
+`forRoom` is synchronous and accepts only the exact managed-ingress context
+instance registered to that `WorkloadIdentityClient`; fabricated objects,
+clones, substituted fields, and contexts from another client are rejected. Its
+client accepts only Hub-relative paths and one exact scope, sends the verified
 `authorizationBindingId` only to workload-token issuance, and does not expose a
-raw token. Token caching and concurrent issuance are isolated by the complete
-workspace, generation, and room receipt/epoch/version identity. A 401 evicts
-only that identity. POST/PATCH replay requires both `retryMode: 'idempotent'`
-and `replayable: true`; safe methods retain one refresh retry.
+raw token. Exact `roomId` and `authorizationBindingId` keys are reserved in the
+parsed query, nested JSON, `URLSearchParams`, and `FormData`; malformed declared
+JSON/form bodies and opaque streams are rejected before issuance. Strings,
+blobs, and byte buffers with a non-semantic content type remain exact raw
+payloads and are not scanned for coincidental text. Token caching and concurrent
+issuance are isolated by the complete workspace, generation, and room
+receipt/epoch/version identity, with one fixed 64-entry process-local LRU/token
+and active-issuance bound. A 401 evicts only the exact key that supplied the
+attempted token. POST/PATCH replay requires both `retryMode: 'idempotent'` and
+`replayable: true`; safe methods retain one refresh retry.
 
 ## Manifest v2 preflight
 

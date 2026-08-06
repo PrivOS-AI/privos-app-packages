@@ -27,6 +27,7 @@ import {
 	type UiResourceProvider,
 } from '../runtime.js';
 import { getWorkloadIdentityClient, type WorkloadIdentityClient } from '../workload/workload-identity.js';
+import { registerManagedIngressRoomAuthority } from '../workload/managed-ingress-authority.js';
 import {
 	isUnsignedRuntimeReadinessRpcV3,
 	verifyClusterDispatchAssertionV3,
@@ -189,6 +190,7 @@ async function handleMcpPost(
 
 	let runtimeAuthorization: VerifiedRuntimeAuthorizationV3 | undefined;
 	let managedBrokerContext: WorkloadBrokerContext | undefined;
+	let managedWorkloadClient: WorkloadIdentityClient | undefined;
 	let callerAuth = options.auth;
 	const managedAssertionHeaders = rawHeaderValues(req, 'x-privos-dispatch-assertion');
 	const runtimeAssertionHeaders = rawHeaderValues(req, 'x-privos-mcp-dispatch-assertion');
@@ -244,6 +246,7 @@ async function handleMcpPost(
 				if (brokerContext.binding.generation) {
 					runtimeAuthorization = verifyClusterDispatchAssertionV3({ compact: assertion, body, context: brokerContext });
 					managedBrokerContext = brokerContext;
+					managedWorkloadClient = workloadClient;
 					const descriptor = await runtime.resolveDescriptor();
 					callerAuth = managedHubUserAuth(brokerContext, descriptor.id, options.auth);
 				} else {
@@ -302,8 +305,11 @@ async function handleMcpPost(
 		denyDispatch(res, requestId);
 		return;
 	}
-
-	const outcome = await runtime.dispatchObject(body, context);
+	const finalizeContext = managedWorkloadClient && runtimeAuthorization?.authorizationContext === 'room'
+		? (requestContext: typeof context) =>
+			registerManagedIngressRoomAuthority(managedWorkloadClient, requestContext, runtimeAuthorization)
+		: undefined;
+	const outcome = await runtime.dispatchObject(body, context, finalizeContext);
 
 	if (outcome.type === 'no_response' || outcome.type === 'protocol_warning') {
 		res.status(202).end();
