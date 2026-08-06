@@ -70,6 +70,7 @@ export type WorkloadIdentityErrorCode =
 	| 'BROKER_UNAVAILABLE'
 	| 'BROKER_RESPONSE_INVALID'
 	| 'HUB_IDENTITY_INVALID'
+	| 'CLIENT_DISPOSED'
 	| 'READINESS_DENIED'
 	| 'TOKEN_DENIED'
 	| 'TOKEN_RESPONSE_INVALID'
@@ -512,6 +513,7 @@ export class WorkloadIdentityClient {
 	private readonly publicJwk: JsonWebKey;
 	private readonly tokens = new Map<string, CachedToken>();
 	private readonly tokenIssuance = new Map<string, Promise<TokenLease>>();
+	private disposed = false;
 	private ready = false;
 	private context?: WorkloadBrokerContext;
 	private monitor?: ReturnType<typeof setInterval>;
@@ -538,6 +540,12 @@ export class WorkloadIdentityClient {
 
 	isAvailable(): boolean {
 		return Boolean(this.brokerRequester) || fs.existsSync(this.socketPath);
+	}
+
+	private assertNotDisposed(): void {
+		if (this.disposed) {
+			throw new WorkloadIdentityError('CLIENT_DISPOSED', 'The workload identity client is disposed.');
+		}
 	}
 
 	private proof(input: { htu: string; htm: string; nonce?: string; ath?: string }): string {
@@ -593,8 +601,10 @@ export class WorkloadIdentityClient {
 	}
 
 	private async attest(): Promise<{ broker: WorkloadBrokerResponse; nonce: string }> {
+		this.assertNotDisposed();
 		const nonce = crypto.randomBytes(24).toString('base64url');
 		const broker = await this.requestBroker({ op: 'attest', publicJwk: this.publicJwk, nonce });
+		this.assertNotDisposed();
 		if (
 			!broker ||
 			broker.ok !== true ||
@@ -651,9 +661,11 @@ export class WorkloadIdentityClient {
 	}
 
 	async ensureReady(): Promise<void> {
+		this.assertNotDisposed();
 		if (this.ready) return;
 		this.contextCapabilities('pairing', []);
 		const { broker, nonce } = await this.attest();
+		this.assertNotDisposed();
 		const target = `${broker.hubOrigin}/api/v1/mcp-workload.ready`;
 		const response = await this.fetchImplementation(target, {
 			method: 'POST',
@@ -661,6 +673,7 @@ export class WorkloadIdentityClient {
 			body: JSON.stringify({ attestation: broker.attestation }),
 			signal: AbortSignal.timeout(10_000),
 		});
+		this.assertNotDisposed();
 		if (!response.ok) {
 			this.contextCapabilities('stale', [], 'READINESS_DENIED');
 			throw new WorkloadIdentityError('READINESS_DENIED', 'PrivOS did not accept workload readiness.', response.status);
@@ -688,8 +701,11 @@ export class WorkloadIdentityClient {
 	}
 
 	private async issueAccessToken(cacheKey: string, authorization?: RoomAuthorization): Promise<TokenLease> {
+		this.assertNotDisposed();
 		await this.ensureReady();
+		this.assertNotDisposed();
 		const { broker, nonce } = await this.attest();
+		this.assertNotDisposed();
 		if (authorization) assertRoomMatchesBroker(this.context!, authorization);
 		const currentKey = authorization
 			? roomAuthorizationKey(this.context!, authorization)
@@ -708,6 +724,7 @@ export class WorkloadIdentityClient {
 			}),
 			signal: AbortSignal.timeout(10_000),
 		});
+		this.assertNotDisposed();
 		if (!response.ok) {
 			this.tokens.delete(cacheKey);
 			this.tokens.delete(currentKey);
@@ -717,7 +734,9 @@ export class WorkloadIdentityClient {
 		let body: { access_token?: unknown; expires_in?: unknown; token_type?: unknown; scope?: unknown };
 		try {
 			body = await response.json() as typeof body;
+			this.assertNotDisposed();
 		} catch {
+			this.assertNotDisposed();
 			throw new WorkloadIdentityError('TOKEN_RESPONSE_INVALID', 'The workload token response is invalid.');
 		}
 		if (
@@ -739,6 +758,7 @@ export class WorkloadIdentityClient {
 	}
 
 	private tokenFor(cacheKey: string, authorization?: RoomAuthorization, forceRefresh = false): Promise<TokenLease> {
+		this.assertNotDisposed();
 		this.pruneUnusableTokens();
 		const cached = this.tokens.get(cacheKey);
 		if (!forceRefresh && cached) {
@@ -764,13 +784,19 @@ export class WorkloadIdentityClient {
 	}
 
 	async getAccessToken(options: { forceRefresh?: boolean } = {}): Promise<string> {
+		this.assertNotDisposed();
 		await this.ensureReady();
+		this.assertNotDisposed();
 		const context = await this.brokerContext();
-		return (await this.tokenFor(workspaceAuthorizationKey(context), undefined, options.forceRefresh)).token.value;
+		this.assertNotDisposed();
+		const lease = await this.tokenFor(workspaceAuthorizationKey(context), undefined, options.forceRefresh);
+		this.assertNotDisposed();
+		return lease.token.value;
 	}
 
 	async getEffectiveCapabilities(options: { forceRefresh?: boolean } = {}): Promise<EffectiveCapabilities> {
 		await this.getAccessToken(options);
+		this.assertNotDisposed();
 		return this.capabilities;
 	}
 
@@ -798,6 +824,7 @@ export class WorkloadIdentityClient {
 	}
 
 	startCapabilityMonitor(intervalMs = 60_000): () => void {
+		this.assertNotDisposed();
 		if (!Number.isFinite(intervalMs) || intervalMs < 5_000) throw new RangeError('Capability monitor interval must be at least 5000 ms.');
 		if (!this.monitor) {
 			this.monitor = setInterval(() => {
@@ -814,6 +841,7 @@ export class WorkloadIdentityClient {
 	}
 
 	forRoom(context: ToolCallContext): RoomBoundWorkloadClient {
+		this.assertNotDisposed();
 		const privateAuthority = managedIngressRoomAuthority(this, context);
 		if (
 			!privateAuthority ||
@@ -829,6 +857,7 @@ export class WorkloadIdentityClient {
 	}
 
 	private async performAuthorizedFetch(target: URL, init: RequestInit, token: string): Promise<Response> {
+		this.assertNotDisposed();
 		const headers = new Headers(init.headers);
 		headers.set('authorization', `DPoP ${token}`);
 		headers.set('dpop', this.proof({
@@ -840,8 +869,11 @@ export class WorkloadIdentityClient {
 	}
 
 	async authorizedFetch(input: string | URL, init: WorkloadFetchInit = {}): Promise<Response> {
+		this.assertNotDisposed();
 		await this.ensureReady();
+		this.assertNotDisposed();
 		const context = await this.brokerContext();
+		this.assertNotDisposed();
 		const target = new URL(input, context.hubOrigin);
 		if (target.origin !== context.hubOrigin) {
 			throw new WorkloadIdentityError('TARGET_ORIGIN_INVALID', 'Workload authorization can only be sent to the bound PrivOS Hub.');
@@ -850,6 +882,7 @@ export class WorkloadIdentityClient {
 		const method = (requestInit.method ?? 'GET').toUpperCase();
 		const cacheKey = workspaceAuthorizationKey(context);
 		const lease = await this.tokenFor(cacheKey);
+		this.assertNotDisposed();
 		const response = await this.performAuthorizedFetch(target, requestInit, lease.token.value);
 		if (response.status !== 401) return response;
 		this.tokens.delete(lease.cacheKey);
@@ -879,6 +912,7 @@ export class WorkloadIdentityClient {
 		init: RoomBoundWorkloadFetchInit,
 		throwOnAuthorization: boolean,
 	): Promise<Response> {
+		this.assertNotDisposed();
 		if (
 			typeof input !== 'string' ||
 			!input.startsWith('/') ||
@@ -894,8 +928,11 @@ export class WorkloadIdentityClient {
 		const parsedTarget = new URL(input, 'https://room-bound.invalid');
 		assertNoReservedQuery(parsedTarget);
 		await assertNoReservedBody(init);
+		this.assertNotDisposed();
 		await this.ensureReady();
+		this.assertNotDisposed();
 		const context = await this.brokerContext();
+		this.assertNotDisposed();
 		assertRoomMatchesBroker(context, authorization);
 		const target = new URL(input, context.hubOrigin);
 		if (target.origin !== context.hubOrigin) {
@@ -905,6 +942,7 @@ export class WorkloadIdentityClient {
 		const method = (requestInit.method ?? 'GET').toUpperCase();
 		const cacheKey = roomAuthorizationKey(context, authorization);
 		let lease = await this.tokenFor(cacheKey, authorization);
+		this.assertNotDisposed();
 		if (!lease.token.scopes.includes(requiredScope)) throw new WorkloadPermissionDeniedError(requiredScope);
 		let response = await this.performAuthorizedFetch(target, requestInit, lease.token.value);
 		if (response.status === 401) {
@@ -928,12 +966,16 @@ export class WorkloadIdentityClient {
 	}
 
 	async brokerContext(): Promise<WorkloadBrokerContext> {
+		this.assertNotDisposed();
 		if (!this.context) await this.attest();
+		this.assertNotDisposed();
 		if (!this.context) throw new WorkloadIdentityError('BROKER_RESPONSE_INVALID', 'The workload broker response is invalid.');
 		return this.context;
 	}
 
 	dispose(): void {
+		if (this.disposed) return;
+		this.disposed = true;
 		this.stopCapabilityMonitor();
 		this.tokens.clear();
 		this.tokenIssuance.clear();

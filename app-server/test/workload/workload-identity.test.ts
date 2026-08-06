@@ -584,6 +584,50 @@ describe('WorkloadIdentityClient', () => {
 		expect(JSON.stringify(client)).not.toContain('bounded-token-');
 	});
 
+	it('keeps disposal terminal when pending token issuance settles successfully', async () => {
+		let releaseTokenResponse: (() => void) | undefined;
+		let tokenCalls = 0;
+		let apiCalls = 0;
+		const fetchMock = vi.fn(async (input: string | URL | Request) => {
+			const target = String(input);
+			if (target.endsWith('mcp-workload.ready')) return jsonResponse({ status: 'active' });
+			if (target.endsWith('mcp-workload.token')) {
+				tokenCalls += 1;
+				return new Promise<Response>((resolve) => {
+					releaseTokenResponse = () => resolve(jsonResponse({
+						access_token: `post-dispose-token-${'x'.repeat(32)}`,
+						token_type: 'DPoP',
+						expires_in: 300,
+						scope: 'basic:information',
+					}));
+				});
+			}
+			apiCalls += 1;
+			return new Response(null, { status: 200 });
+		});
+		const client = new WorkloadIdentityClient({
+			brokerRequest: generationBrokerFactory({}, actorJwksOrigin),
+			fetch: fetchMock,
+		});
+		await client.ensureReady();
+
+		const pending = client.authorizedFetch('/api/v1/workspace');
+		await vi.waitFor(() => expect(releaseTokenResponse).toBeTypeOf('function'));
+		client.dispose();
+		client.dispose();
+		releaseTokenResponse!();
+
+		await expect(pending).rejects.toMatchObject({ code: 'CLIENT_DISPOSED' });
+		expect((client as any).tokens.size).toBe(0);
+		expect((client as any).tokenIssuance.size).toBe(0);
+		expect(client.peekEffectiveCapabilities().status).toBe('paired');
+		expect(apiCalls).toBe(0);
+
+		await expect(client.authorizedFetch('/api/v1/workspace')).rejects.toMatchObject({ code: 'CLIENT_DISPOSED' });
+		expect(tokenCalls).toBe(1);
+		expect(apiCalls).toBe(0);
+	});
+
 	it('coalesces same-key issuance, bounds 64 distinct active keys, and releases settled capacity', async () => {
 		const releases: Array<() => void> = [];
 		let tokenCalls = 0;
