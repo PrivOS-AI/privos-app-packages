@@ -2,6 +2,9 @@ import crypto, { type JsonWebKey } from 'node:crypto';
 import fs from 'node:fs';
 import net from 'node:net';
 
+import type { ToolCallContext } from '../context/tool-call-context.js';
+import type { VerifiedRuntimeAuthorizationV3 } from './dispatch-assertion.js';
+
 export const DEFAULT_WORKLOAD_SOCKET = '/run/privos/identity.sock';
 
 export type WorkloadBrokerResponse = {
@@ -90,7 +93,14 @@ export class WorkloadPermissionDeniedError extends WorkloadIdentityError {
 export type WorkloadFetchInit = RequestInit & {
 	/** POST/PATCH retries are disabled unless the caller explicitly proves idempotency. */
 	retryMode?: 'safe-methods' | 'idempotent' | 'never';
+	/** Required together with `retryMode: 'idempotent'` for mutation replay. */
+	replayable?: true;
 	requiredScope?: string;
+};
+
+export type RoomBoundWorkloadFetchInit = Omit<WorkloadFetchInit, 'requiredScope'> & {
+	/** One exact granted permission; unions, wildcards, and whitespace are rejected. */
+	requiredScope: string;
 };
 
 type FetchImplementation = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
@@ -109,6 +119,49 @@ type CachedToken = {
 	expiresAt: number;
 	scopes: string[];
 };
+
+type RoomAuthorization = Readonly<{
+	workspaceId: string;
+	deploymentId: string;
+	generationId: string;
+	generationNumber: number;
+	runtimeInstallationId: string;
+	mcpAppId: string;
+	manifestDigest: string;
+	resourceManifestHash: string;
+	runtimeResourceInventoryHash: string;
+	runtimeApprovalReceiptHash: string;
+	runtimeAuthorizationEpoch: number;
+	roomId: string;
+	authorizationBindingId: string;
+	bindingReceiptHash: string;
+	bindingEpoch: number;
+	bindingGrantHash?: string;
+	bindingTokenVersion?: number;
+}>;
+
+type RoomRequest = (input: string, init: RoomBoundWorkloadFetchInit, throwOnAuthorization: boolean) => Promise<Response>;
+
+/** Request-only capability derived synchronously from one verified room context. */
+export class RoomBoundWorkloadClient {
+	constructor(private readonly request: RoomRequest) {}
+
+	authorizedFetch(input: string, init: RoomBoundWorkloadFetchInit): Promise<Response> {
+		return this.request(input, init, false);
+	}
+
+	authorizedRequest(input: string, init: RoomBoundWorkloadFetchInit): Promise<Response> {
+		return this.request(input, init, true);
+	}
+
+	toJSON(): Record<string, unknown> {
+		return { type: 'RoomBoundWorkloadClient' };
+	}
+
+	[Symbol.for('nodejs.util.inspect.custom')](): Record<string, unknown> {
+		return this.toJSON();
+	}
+}
 
 function encode(value: unknown): string {
 	return Buffer.from(JSON.stringify(value), 'utf8').toString('base64url');
@@ -249,10 +302,109 @@ function capabilitiesEqual(left: EffectiveCapabilities, right: EffectiveCapabili
 	return JSON.stringify({ ...left, updatedAt: 0 }) === JSON.stringify({ ...right, updatedAt: 0 });
 }
 
-function retryAllowed(method: string, mode: WorkloadFetchInit['retryMode']): boolean {
+function retryAllowed(method: string, mode: WorkloadFetchInit['retryMode'], replayable: WorkloadFetchInit['replayable']): boolean {
 	if (mode === 'never') return false;
-	if (mode === 'idempotent') return true;
+	if (mode === 'idempotent') return replayable === true;
 	return ['GET', 'HEAD', 'OPTIONS', 'PUT', 'DELETE'].includes(method);
+}
+
+function exactScope(scope: unknown): scope is string {
+	return typeof scope === 'string' && /^[a-z][a-z0-9-]*(?::[a-z][a-z0-9-]*)+$/.test(scope);
+}
+
+function workspaceAuthorizationKey(context: WorkloadBrokerContext): string {
+	const generation = context.binding.generation;
+	return JSON.stringify([
+		'workspace',
+		context.hubOrigin,
+		context.binding.workspaceId,
+		context.binding.installationId,
+		context.binding.mcpAppId,
+		context.binding.receiptHash,
+		context.binding.grantEpoch,
+		...(generation
+			? [
+					generation.clusterId,
+					generation.deploymentId,
+					generation.generationId,
+					generation.generationNumber,
+					generation.manifestDigest,
+					generation.resourceManifestHash,
+					generation.runtimeResourceInventoryHash,
+				]
+			: []),
+	]);
+}
+
+function roomAuthorizationKey(context: WorkloadBrokerContext, authorization: RoomAuthorization): string {
+	return JSON.stringify([
+		'room',
+		workspaceAuthorizationKey(context),
+		authorization.roomId,
+		authorization.authorizationBindingId,
+		authorization.bindingReceiptHash,
+		authorization.bindingEpoch,
+		authorization.bindingGrantHash ?? null,
+		authorization.bindingTokenVersion ?? null,
+	]);
+}
+
+function roomAuthorizationFromContext(context: ToolCallContext): RoomAuthorization {
+	const authorization: VerifiedRuntimeAuthorizationV3 | undefined = context.runtimeAuthorization;
+	if (
+		!authorization ||
+		authorization.authorizationContext !== 'room' ||
+		!authorization.authorizationBindingId ||
+		!authorization.roomId ||
+		!authorization.bindingReceiptHash ||
+		!Number.isSafeInteger(authorization.bindingEpoch) ||
+		Number(authorization.bindingEpoch) < 1 ||
+		!context.actor ||
+		context.identityState !== 'verified' ||
+		context.roomId !== authorization.roomId ||
+		context.actor.roomId !== authorization.roomId
+	) {
+		throw new WorkloadIdentityError('PERMISSION_DENIED', 'A verified room-bound human context is required.', 403);
+	}
+	return Object.freeze({
+		workspaceId: authorization.workspaceId,
+		deploymentId: authorization.deploymentId,
+		generationId: authorization.generationId,
+		generationNumber: authorization.generationNumber,
+		runtimeInstallationId: authorization.runtimeInstallationId,
+		mcpAppId: authorization.mcpAppId,
+		manifestDigest: authorization.manifestDigest,
+		resourceManifestHash: authorization.resourceManifestHash,
+		runtimeResourceInventoryHash: authorization.runtimeResourceInventoryHash,
+		runtimeApprovalReceiptHash: authorization.runtimeApprovalReceiptHash,
+		runtimeAuthorizationEpoch: authorization.runtimeAuthorizationEpoch,
+		roomId: authorization.roomId,
+		authorizationBindingId: authorization.authorizationBindingId,
+		bindingReceiptHash: authorization.bindingReceiptHash,
+		bindingEpoch: Number(authorization.bindingEpoch),
+		...('bindingGrantHash' in authorization ? { bindingGrantHash: authorization.bindingGrantHash } : {}),
+		...('bindingTokenVersion' in authorization ? { bindingTokenVersion: authorization.bindingTokenVersion } : {}),
+	});
+}
+
+function assertRoomMatchesBroker(context: WorkloadBrokerContext, authorization: RoomAuthorization): void {
+	const generation = context.binding.generation;
+	if (
+		!generation ||
+		context.binding.workspaceId !== authorization.workspaceId ||
+		context.binding.installationId !== authorization.runtimeInstallationId ||
+		context.binding.mcpAppId !== authorization.mcpAppId ||
+		context.binding.receiptHash !== authorization.runtimeApprovalReceiptHash ||
+		context.binding.grantEpoch !== authorization.runtimeAuthorizationEpoch ||
+		generation.deploymentId !== authorization.deploymentId ||
+		generation.generationId !== authorization.generationId ||
+		generation.generationNumber !== authorization.generationNumber ||
+		generation.manifestDigest !== authorization.manifestDigest ||
+		generation.resourceManifestHash !== authorization.resourceManifestHash ||
+		generation.runtimeResourceInventoryHash !== authorization.runtimeResourceInventoryHash
+	) {
+		throw new WorkloadIdentityError('AUTHORIZATION_STALE', 'The verified room authorization is stale.', 401);
+	}
 }
 
 export class WorkloadIdentityClient {
@@ -263,7 +415,8 @@ export class WorkloadIdentityClient {
 	private readonly refreshSkewMs: number;
 	private readonly privateJwk: JsonWebKey;
 	private readonly publicJwk: JsonWebKey;
-	private token?: CachedToken;
+	private readonly tokens = new Map<string, CachedToken>();
+	private readonly tokenIssuance = new Map<string, Promise<CachedToken>>();
 	private ready = false;
 	private context?: WorkloadBrokerContext;
 	private monitor?: ReturnType<typeof setInterval>;
@@ -421,18 +574,29 @@ export class WorkloadIdentityClient {
 		this.contextCapabilities('paired', []);
 	}
 
-	private async issueAccessToken(): Promise<CachedToken> {
+	private async issueAccessToken(cacheKey: string, authorization?: RoomAuthorization): Promise<CachedToken> {
 		await this.ensureReady();
 		const { broker, nonce } = await this.attest();
+		if (authorization) assertRoomMatchesBroker(this.context!, authorization);
+		const currentKey = authorization
+			? roomAuthorizationKey(this.context!, authorization)
+			: workspaceAuthorizationKey(this.context!);
+		if (authorization && currentKey !== cacheKey) {
+			throw new WorkloadIdentityError('AUTHORIZATION_STALE', 'The workload authorization changed during token issuance.', 401);
+		}
 		const target = `${broker.hubOrigin}/api/v1/mcp-workload.token`;
 		const response = await this.fetchImplementation(target, {
 			method: 'POST',
 			headers: { 'content-type': 'application/json', dpop: this.proof({ htu: target, htm: 'POST', nonce }) },
-			body: JSON.stringify({ attestation: broker.attestation }),
+			body: JSON.stringify({
+				attestation: broker.attestation,
+				...(authorization ? { authorizationBindingId: authorization.authorizationBindingId } : {}),
+			}),
 			signal: AbortSignal.timeout(10_000),
 		});
 		if (!response.ok) {
-			this.token = undefined;
+			this.tokens.delete(cacheKey);
+			this.tokens.delete(currentKey);
 			this.contextCapabilities('stale', [], 'TOKEN_DENIED');
 			throw new WorkloadIdentityError('TOKEN_DENIED', 'PrivOS did not issue workload authorization.', response.status);
 		}
@@ -455,14 +619,27 @@ export class WorkloadIdentityClient {
 		}
 		const scopes = parseScopes(body.scope ?? '');
 		const token = { value: body.access_token, expiresAt: this.now() + body.expires_in * 1_000, scopes };
-		this.token = token;
+		this.tokens.set(currentKey, token);
 		this.contextCapabilities('active', scopes);
 		return token;
 	}
 
+	private tokenFor(cacheKey: string, authorization?: RoomAuthorization, forceRefresh = false): Promise<CachedToken> {
+		const cached = this.tokens.get(cacheKey);
+		if (!forceRefresh && cached && cached.expiresAt - this.now() > this.refreshSkewMs) return Promise.resolve(cached);
+		const issuing = this.tokenIssuance.get(cacheKey);
+		if (issuing) return issuing;
+		const started = this.issueAccessToken(cacheKey, authorization).finally(() => {
+			if (this.tokenIssuance.get(cacheKey) === started) this.tokenIssuance.delete(cacheKey);
+		});
+		this.tokenIssuance.set(cacheKey, started);
+		return started;
+	}
+
 	async getAccessToken(options: { forceRefresh?: boolean } = {}): Promise<string> {
-		if (!options.forceRefresh && this.token && this.token.expiresAt - this.now() > this.refreshSkewMs) return this.token.value;
-		return (await this.issueAccessToken()).value;
+		await this.ensureReady();
+		const context = await this.brokerContext();
+		return (await this.tokenFor(workspaceAuthorizationKey(context), undefined, options.forceRefresh)).value;
 	}
 
 	async getEffectiveCapabilities(options: { forceRefresh?: boolean } = {}): Promise<EffectiveCapabilities> {
@@ -509,6 +686,12 @@ export class WorkloadIdentityClient {
 		this.monitor = undefined;
 	}
 
+	forRoom(context: ToolCallContext): RoomBoundWorkloadClient {
+		const authorization = roomAuthorizationFromContext(context);
+		return new RoomBoundWorkloadClient((input, init, throwOnAuthorization) =>
+			this.performRoomRequest(authorization, input, init, throwOnAuthorization));
+	}
+
 	private async performAuthorizedFetch(target: URL, init: RequestInit, token: string): Promise<Response> {
 		const headers = new Headers(init.headers);
 		headers.set('authorization', `DPoP ${token}`);
@@ -527,22 +710,70 @@ export class WorkloadIdentityClient {
 		if (target.origin !== context.hubOrigin) {
 			throw new WorkloadIdentityError('TARGET_ORIGIN_INVALID', 'Workload authorization can only be sent to the bound PrivOS Hub.');
 		}
-		const { retryMode = 'safe-methods', requiredScope: _requiredScope, ...requestInit } = init;
+		const { retryMode = 'safe-methods', replayable, requiredScope: _requiredScope, ...requestInit } = init;
 		const method = (requestInit.method ?? 'GET').toUpperCase();
-		const token = await this.getAccessToken();
-		const response = await this.performAuthorizedFetch(target, requestInit, token);
+		const cacheKey = workspaceAuthorizationKey(context);
+		const token = await this.tokenFor(cacheKey);
+		const response = await this.performAuthorizedFetch(target, requestInit, token.value);
 		if (response.status !== 401) return response;
-		this.token = undefined;
+		this.tokens.delete(cacheKey);
 		this.contextCapabilities('stale', [], 'AUTHORIZATION_STALE');
-		if (!retryAllowed(method, retryMode)) return response;
-		const retryToken = await this.getAccessToken({ forceRefresh: true });
-		return this.performAuthorizedFetch(target, requestInit, retryToken);
+		if (!retryAllowed(method, retryMode, replayable)) return response;
+		const retryToken = await this.tokenFor(cacheKey, undefined, true);
+		return this.performAuthorizedFetch(target, requestInit, retryToken.value);
 	}
 
 	async authorizedRequest(input: string | URL, init: WorkloadFetchInit = {}): Promise<Response> {
 		const response = await this.authorizedFetch(input, init);
 		if (response.status === 403) throw new WorkloadPermissionDeniedError(init.requiredScope);
 		if (response.status === 401) {
+			throw new WorkloadIdentityError('AUTHORIZATION_STALE', 'Workload authorization is stale.', 401);
+		}
+		return response;
+	}
+
+	private async performRoomRequest(
+		authorization: RoomAuthorization,
+		input: string,
+		init: RoomBoundWorkloadFetchInit,
+		throwOnAuthorization: boolean,
+	): Promise<Response> {
+		if (
+			typeof input !== 'string' ||
+			!input.startsWith('/') ||
+			input.startsWith('//') ||
+			Object.prototype.hasOwnProperty.call(init, 'roomId') ||
+			Object.prototype.hasOwnProperty.call(init, 'authorizationBindingId')
+		) {
+			throw new WorkloadIdentityError('TARGET_ORIGIN_INVALID', 'Room-bound requests accept only Hub-relative paths and verified context binding.', 400);
+		}
+		if (!exactScope(init.requiredScope)) {
+			throw new WorkloadIdentityError('PERMISSION_DENIED', 'A single exact permission scope is required.', 403);
+		}
+		await this.ensureReady();
+		const context = await this.brokerContext();
+		assertRoomMatchesBroker(context, authorization);
+		const target = new URL(input, context.hubOrigin);
+		if (target.origin !== context.hubOrigin) {
+			throw new WorkloadIdentityError('TARGET_ORIGIN_INVALID', 'Workload authorization can only be sent to the bound PrivOS Hub.');
+		}
+		const { retryMode = 'safe-methods', replayable, requiredScope, ...requestInit } = init;
+		const method = (requestInit.method ?? 'GET').toUpperCase();
+		const cacheKey = roomAuthorizationKey(context, authorization);
+		let token = await this.tokenFor(cacheKey, authorization);
+		if (!token.scopes.includes(requiredScope)) throw new WorkloadPermissionDeniedError(requiredScope);
+		let response = await this.performAuthorizedFetch(target, requestInit, token.value);
+		if (response.status === 401) {
+			this.tokens.delete(cacheKey);
+			this.contextCapabilities('stale', [], 'AUTHORIZATION_STALE');
+			if (retryAllowed(method, retryMode, replayable)) {
+				token = await this.tokenFor(cacheKey, authorization, true);
+				if (!token.scopes.includes(requiredScope)) throw new WorkloadPermissionDeniedError(requiredScope);
+				response = await this.performAuthorizedFetch(target, requestInit, token.value);
+			}
+		}
+		if (throwOnAuthorization && response.status === 403) throw new WorkloadPermissionDeniedError(requiredScope);
+		if (throwOnAuthorization && response.status === 401) {
 			throw new WorkloadIdentityError('AUTHORIZATION_STALE', 'Workload authorization is stale.', 401);
 		}
 		return response;
@@ -556,7 +787,8 @@ export class WorkloadIdentityClient {
 
 	dispose(): void {
 		this.stopCapabilityMonitor();
-		this.token = undefined;
+		this.tokens.clear();
+		this.tokenIssuance.clear();
 		this.listeners.clear();
 	}
 }

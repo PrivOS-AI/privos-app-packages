@@ -18,6 +18,7 @@ import {
 	ephemeralSessionScope,
 	extractDirectCallerCredential,
 	resolveCallerCredential,
+	type CallerCredentialResolution,
 	type AppErrorMapper,
 	type AppMcpHandler,
 	type AppServerRuntimeOptions,
@@ -25,14 +26,16 @@ import {
 	type RuntimeLimits,
 	type UiResourceProvider,
 } from '../runtime.js';
-import { getWorkloadIdentityClient } from '../workload/workload-identity.js';
+import { getWorkloadIdentityClient, type WorkloadIdentityClient } from '../workload/workload-identity.js';
 import {
 	isUnsignedRuntimeReadinessRpcV3,
+	verifyClusterDispatchAssertionV3,
 	verifyDispatchAssertion,
 	verifyRuntimeDispatchAssertionV3,
 	type RuntimeDispatchSecurityV3,
-	type VerifiedRuntimeDispatchAssertionV3,
+	type VerifiedRuntimeAuthorizationV3,
 } from '../workload/dispatch-assertion.js';
+import type { WorkloadBrokerContext } from '../workload/workload-identity.js';
 
 export interface DirectRouterOptions {
 	descriptor: AppDescriptor | (() => AppDescriptor | Promise<AppDescriptor>);
@@ -58,6 +61,8 @@ export interface DirectRouterOptions {
 	runtime?: AppServerRuntime;
 	/** Require Hub dispatch assertions when the Cluster identity socket is mounted. */
 	workloadSecurity?: 'auto' | 'required' | 'disabled';
+	/** Optional app-owned client; useful when readiness and ingress share one broker session. */
+	workloadIdentityClient?: WorkloadIdentityClient;
 	/** Explicit required final-boundary authorization for local or publisher protocol-v3 runtimes. */
 	runtimeDispatchV3?: RuntimeDispatchSecurityV3;
 }
@@ -182,8 +187,10 @@ async function handleMcpPost(
 		? candidateRequestId
 		: undefined;
 
-	let runtimeAuthorization: VerifiedRuntimeDispatchAssertionV3 | undefined;
-	const legacyAssertionHeaders = rawHeaderValues(req, 'x-privos-dispatch-assertion');
+	let runtimeAuthorization: VerifiedRuntimeAuthorizationV3 | undefined;
+	let managedBrokerContext: WorkloadBrokerContext | undefined;
+	let callerAuth = options.auth;
+	const managedAssertionHeaders = rawHeaderValues(req, 'x-privos-dispatch-assertion');
 	const runtimeAssertionHeaders = rawHeaderValues(req, 'x-privos-mcp-dispatch-assertion');
 	const unsupportedRuntimeAffinityHeaders = [
 		...rawHeaderValues(req, 'x-privos-mcp-runtime-installation-id'),
@@ -193,9 +200,17 @@ async function handleMcpPost(
 		denyDispatch(res, requestId);
 		return;
 	}
+	if (
+		managedAssertionHeaders.length > 1 ||
+		runtimeAssertionHeaders.length > 1 ||
+		(managedAssertionHeaders.length > 0 && runtimeAssertionHeaders.length > 0)
+	) {
+		denyDispatch(res, requestId);
+		return;
+	}
 	if (options.runtimeDispatchV3) {
 		try {
-			if (legacyAssertionHeaders.length > 0 || runtimeAssertionHeaders.length > 1) {
+			if (managedAssertionHeaders.length > 0) {
 				throw new Error('dispatch_assertion_ambiguous');
 			}
 			if (runtimeAssertionHeaders.length === 0) {
@@ -218,27 +233,45 @@ async function handleMcpPost(
 			denyDispatch(res, requestId);
 			return;
 		}
-		const workloadClient = getWorkloadIdentityClient();
+		const workloadClient = options.workloadIdentityClient ?? getWorkloadIdentityClient();
 		const workloadSecurity = options.workloadSecurity ?? 'auto';
 		const requireDispatchAssertion = workloadSecurity === 'required' || (workloadSecurity === 'auto' && workloadClient.isAvailable());
 		if (requireDispatchAssertion) {
 			try {
-				const assertion = headerValue(req.headers['x-privos-dispatch-assertion']);
+				const assertion = managedAssertionHeaders[0];
 				if (!assertion) throw new Error('dispatch_assertion_missing');
-				verifyDispatchAssertion({ compact: assertion, body, context: await workloadClient.brokerContext() });
+				const brokerContext = await workloadClient.brokerContext();
+				if (brokerContext.binding.generation) {
+					runtimeAuthorization = verifyClusterDispatchAssertionV3({ compact: assertion, body, context: brokerContext });
+					managedBrokerContext = brokerContext;
+					const descriptor = await runtime.resolveDescriptor();
+					callerAuth = managedHubUserAuth(brokerContext, descriptor.id, options.auth);
+				} else {
+					verifyDispatchAssertion({ compact: assertion, body, context: brokerContext });
+				}
 			} catch {
 				denyDispatch(res, requestId);
 				return;
 			}
+		} else if (managedAssertionHeaders.length > 0) {
+			denyDispatch(res, requestId);
+			return;
 		}
 	}
-	const extract =
-		options.extractCallerCredential ??
-		((ingress: { headers: Request['headers'] }) =>
-			extractDirectCallerCredential(
-				ingress.headers as Record<string, string | string[] | undefined>,
-			));
-	const credentialResolution = await resolveCallerCredential(extract, { headers: req.headers });
+	const credentialResolution = managedBrokerContext
+		? strictDirectCallerCredential(req)
+		: await resolveCallerCredential(
+				options.extractCallerCredential ??
+					((ingress: { headers: Request['headers'] }) =>
+						extractDirectCallerCredential(
+							ingress.headers as Record<string, string | string[] | undefined>,
+						)),
+				{ headers: req.headers },
+			);
+	if (managedBrokerContext && credentialResolution.kind === 'error') {
+		denyDispatch(res, requestId);
+		return;
+	}
 
 	const sessionHeader = headerValue(req.headers['mcp-session-id']);
 	const sessionScope = sessionHeader?.trim()
@@ -252,6 +285,7 @@ async function handleMcpPost(
 			requestId,
 			sessionScope,
 			credentialResolution,
+			...(callerAuth ? { auth: callerAuth } : {}),
 			...(runtimeAuthorization ? { runtimeAuthorization } : {}),
 		});
 	} catch (error) {
@@ -260,6 +294,13 @@ async function handleMcpPost(
 			return;
 		}
 		throw error;
+	}
+	if (
+		runtimeAuthorization?.authorizationContext === 'room' &&
+		(context.identityState !== 'verified' || !context.actor)
+	) {
+		denyDispatch(res, requestId);
+		return;
 	}
 
 	const outcome = await runtime.dispatchObject(body, context);
@@ -308,6 +349,49 @@ function rawHeaderValues(req: Request, name: string): string[] {
 		if (req.rawHeaders[index]?.toLowerCase() === name) values.push(req.rawHeaders[index + 1] ?? '');
 	}
 	return values;
+}
+
+function strictDirectCallerCredential(req: Request): CallerCredentialResolution {
+	const authorization = rawHeaderValues(req, 'authorization');
+	const assertedUserIds = rawHeaderValues(req, 'x-mcp-user-id');
+	if (authorization.length === 0 && assertedUserIds.length === 0) return { kind: 'absent' };
+	if (authorization.length !== 1 || assertedUserIds.length !== 1) {
+		return { kind: 'error', message: 'Caller credential headers are incomplete or ambiguous' };
+	}
+	const auth = authorization[0]!;
+	const assertedUserId = assertedUserIds[0]!;
+	if (
+		!auth.startsWith('Bearer ') ||
+		auth.slice('Bearer '.length).trim() !== auth.slice('Bearer '.length) ||
+		!/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(auth.slice('Bearer '.length)) ||
+		Buffer.byteLength(auth.slice('Bearer '.length), 'utf8') > 32_768 ||
+		!/^[A-Za-z0-9][A-Za-z0-9._:@-]{0,159}$/.test(assertedUserId)
+	) {
+		return { kind: 'error', message: 'Caller credential headers are malformed' };
+	}
+	return {
+		kind: 'present',
+		credential: {
+			token: auth.slice('Bearer '.length),
+			assertedUserId,
+			source: 'direct-header',
+		},
+	};
+}
+
+function managedHubUserAuth(
+	context: WorkloadBrokerContext,
+	audience: string,
+	base?: AuthOptions,
+): AuthOptions {
+	return {
+		jwksUrl: new URL('/.well-known/mcp-apps/jwks.json', context.hubOrigin),
+		audience,
+		issuer: context.hubOrigin,
+		...(base?.clockToleranceSeconds !== undefined ? { clockToleranceSeconds: base.clockToleranceSeconds } : {}),
+		...(base?.jwksCacheTtlMs !== undefined ? { jwksCacheTtlMs: base.jwksCacheTtlMs } : {}),
+		...(base?.fetchTimeoutMs !== undefined ? { fetchTimeoutMs: base.fetchTimeoutMs } : {}),
+	};
 }
 
 function denyDispatch(res: Response, requestId: string | number | null | undefined): void {

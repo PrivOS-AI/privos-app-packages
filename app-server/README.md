@@ -255,6 +255,36 @@ Verified runtime authorization is exposed as the frozen
 `runtimeInstallationId` and child `authorizationBindingId`; any separately
 verified actor JWT with a missing or different room is denied.
 
+Managed App Library generations use this same canonical Direct ingress. The
+router learns the generation from the verified workload broker, accepts only
+`X-PrivOS-Dispatch-Assertion`, verifies it with
+`verifyClusterDispatchAssertionV3`, and pins caller JWT verification to the
+broker-bound Hub origin, that Hub's `/.well-known/mcp-apps/jwks.json`, and the
+descriptor app id. Publisher-hosted and self-hosted-local v3 runtimes continue
+to use only `X-PrivOS-MCP-Dispatch-Assertion`. Sending both headers, duplicating
+either header, or supplying a room assertion without one matching verified
+human credential is denied before the handler runs.
+
+For backend calls that must retain the verified room child-binding, derive a
+request-only client from the tool context:
+
+```ts
+const roomHub = workloadIdentityClient.forRoom(context);
+const response = await roomHub.authorizedRequest('/api/v1/example.read', {
+  method: 'GET',
+  requiredScope: 'example:read',
+});
+```
+
+`forRoom` is synchronous and rejects workspace authorization, a missing actor,
+or any actor/context/assertion room mismatch. Its client accepts only
+Hub-relative paths and one exact scope, sends the verified
+`authorizationBindingId` only to workload-token issuance, and does not expose a
+raw token. Token caching and concurrent issuance are isolated by the complete
+workspace, generation, and room receipt/epoch/version identity. A 401 evicts
+only that identity. POST/PATCH replay requires both `retryMode: 'idempotent'`
+and `replayable: true`; safe methods retain one refresh retry.
+
 ## Manifest v2 preflight
 
 ```bash

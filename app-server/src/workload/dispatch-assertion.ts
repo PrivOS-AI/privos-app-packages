@@ -697,13 +697,35 @@ const CLUSTER_DISPATCH_V3_ROOM_KEYS = [
 ] as const;
 
 export type VerifiedClusterDispatchAssertionV3 = Readonly<{
+	verificationPath: 'managed-cluster-v3';
+	protocolVersion: 3;
+	type: 'hub-dispatch-assertion';
+	issuer: string;
 	jti: string;
 	issuedAt: number;
 	expiresAt: number;
+	workspaceId: string;
+	deploymentId: string;
+	generationId: string;
+	generationNumber: number;
+	runtimeInstallationId: string;
+	mcpAppId: string;
+	manifestDigest: string;
+	resourceManifestHash: string;
+	runtimeResourceInventoryHash: string;
+	runtimeApprovalReceiptHash: string;
+	runtimeAuthorizationEpoch: number;
 	authorizationContext: 'workspace' | 'room';
 	roomId?: string;
 	authorizationBindingId?: string;
+	bindingReceiptHash?: string;
+	bindingEpoch?: number;
 }>;
+
+/** Immutable authorization normalized onto ToolCallContext by any v3 ingress. */
+export type VerifiedRuntimeAuthorizationV3 =
+	| VerifiedRuntimeDispatchAssertionV3
+	| VerifiedClusterDispatchAssertionV3;
 
 /**
  * Verify the dispatch a Hub routes to an App Library runtime through its
@@ -720,16 +742,8 @@ export function verifyClusterDispatchAssertionV3(input: {
 }): VerifiedClusterDispatchAssertionV3 {
 	const generation = input.context.binding.generation;
 	if (!generation) throw new Error('dispatch_assertion_invalid');
-	const parts = input.compact.split('.');
-	if (parts.length !== 3) throw new Error('dispatch_assertion_invalid');
-	let header: Record<string, unknown>;
-	let payload: Record<string, unknown>;
-	try {
-		header = JSON.parse(Buffer.from(parts[0]!, 'base64url').toString('utf8')) as Record<string, unknown>;
-		payload = JSON.parse(Buffer.from(parts[1]!, 'base64url').toString('utf8')) as Record<string, unknown>;
-	} catch {
-		throw new Error('dispatch_assertion_invalid');
-	}
+	const parsed = parseRuntimeDispatchCompactV3(input.compact);
+	const { header, payload } = parsed;
 	if (
 		!isRecord(header) ||
 		!isRecord(payload) ||
@@ -744,9 +758,9 @@ export function verifyClusterDispatchAssertionV3(input: {
 	const key = crypto.createPublicKey({ key: input.context.hubPublicJwk, format: 'jwk' });
 	if (!crypto.verify(
 		'sha256',
-		Buffer.from(`${parts[0]}.${parts[1]}`, 'utf8'),
+		Buffer.from(`${parsed.encodedHeader}.${parsed.encodedPayload}`, 'ascii'),
 		{ key, dsaEncoding: 'ieee-p1363' },
-		Buffer.from(parts[2]!, 'base64url'),
+		parsed.signature,
 	)) throw new Error('dispatch_assertion_invalid');
 	const now = input.now ?? Math.floor(Date.now() / 1000);
 	const room = payload.authorizationContext === 'room';
@@ -803,11 +817,33 @@ export function verifyClusterDispatchAssertionV3(input: {
 	if (replay.has(payload.jti)) throw new Error('dispatch_assertion_replayed');
 	replay.set(payload.jti, Number(payload.exp));
 	return Object.freeze({
+		verificationPath: 'managed-cluster-v3',
+		protocolVersion: 3,
+		type: 'hub-dispatch-assertion',
+		issuer: String(payload.iss),
 		jti: payload.jti,
 		issuedAt: Number(payload.iat),
 		expiresAt: Number(payload.exp),
+		workspaceId: String(payload.workspaceId),
+		deploymentId: String(payload.deploymentId),
+		generationId: String(payload.generationId),
+		generationNumber: Number(payload.generationNumber),
+		runtimeInstallationId: String(payload.runtimeInstallationId),
+		mcpAppId: String(payload.mcpAppId),
+		manifestDigest: String(payload.manifestDigest),
+		resourceManifestHash: String(payload.resourceManifestHash),
+		runtimeResourceInventoryHash: String(payload.runtimeResourceInventoryHash),
+		runtimeApprovalReceiptHash: String(payload.runtimeApprovalReceiptHash),
+		runtimeAuthorizationEpoch: Number(payload.runtimeGrantEpoch),
 		authorizationContext: room ? 'room' : 'workspace',
-		...(room ? { roomId: String(payload.roomId), authorizationBindingId: String(payload.authorizationBindingId) } : {}),
+		...(room
+			? {
+					roomId: String(payload.roomId),
+					authorizationBindingId: String(payload.authorizationBindingId),
+					bindingReceiptHash: String(payload.bindingReceiptHash),
+					bindingEpoch: Number(payload.bindingEpoch),
+				}
+			: {}),
 	});
 }
 

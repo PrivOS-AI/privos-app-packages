@@ -10,6 +10,7 @@ import {
 	type WorkloadBinding,
 	type WorkloadBrokerResponse,
 } from '../../src/workload/workload-identity.js';
+import type { ToolCallContext } from '../../src/context/tool-call-context.js';
 
 function hubIdentity(): { kid: string; publicJwk: JsonWebKey } {
 	const pair = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
@@ -109,6 +110,41 @@ function generationBrokerFactory(override: Record<string, unknown> = {}) {
 
 function jsonResponse(body: unknown, status = 200): Response {
 	return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+}
+
+function roomContext(bindingId: string, roomId = 'room-1'): ToolCallContext {
+	return {
+		transport: 'direct',
+		identityState: 'verified',
+		sessionScope: `session-${bindingId}`,
+		roomId,
+		actor: Object.freeze({ userId: 'user-1', roomId, claims: Object.freeze({ sub: 'user-1', rid: roomId }) }),
+		runtimeAuthorization: Object.freeze({
+			verificationPath: 'managed-cluster-v3',
+			protocolVersion: 3,
+			type: 'hub-dispatch-assertion',
+			issuer: 'urn:privos:hub:deployment-1',
+			jti: `dispatch-${bindingId}`,
+			issuedAt: 2_000_000_000,
+			expiresAt: 2_000_000_030,
+			workspaceId: 'workspace-1',
+			deploymentId: 'deployment-1',
+			generationId: 'generation-1',
+			generationNumber: 2,
+			runtimeInstallationId: 'runtime-installation-1',
+			mcpAppId: 'app-1',
+			manifestDigest: `sha256:${'c'.repeat(64)}`,
+			resourceManifestHash: 'd'.repeat(43),
+			runtimeResourceInventoryHash: 'e'.repeat(43),
+			runtimeApprovalReceiptHash: APPROVAL_RECEIPT_HASH,
+			runtimeAuthorizationEpoch: 7,
+			authorizationContext: 'room',
+			roomId,
+			authorizationBindingId: bindingId,
+			bindingReceiptHash: bindingId === 'binding-1' ? 'f'.repeat(43) : 'g'.repeat(43),
+			bindingEpoch: 1,
+		}),
+	};
 }
 
 describe('WorkloadIdentityClient', () => {
@@ -237,5 +273,92 @@ describe('WorkloadIdentityClient', () => {
 		});
 
 		await expect(client.getEffectiveCapabilities()).rejects.toMatchObject({ code: 'BROKER_RESPONSE_INVALID' });
+	});
+
+	it('binds room issuance, caches and coalesces per exact child, and isolates stale eviction', async () => {
+		const issuanceBodies: Array<Record<string, unknown>> = [];
+		const apiTokens: string[] = [];
+		let staleBindingOne = false;
+		const fetchMock = vi.fn(async (request: string | URL | Request, init?: RequestInit) => {
+			const url = String(request);
+			if (url.endsWith('mcp-workload.ready')) return jsonResponse({ status: 'active' });
+			if (url.endsWith('mcp-workload.token')) {
+				const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+				issuanceBodies.push(body);
+				await Promise.resolve();
+				return jsonResponse({
+					access_token: `${String(body.authorizationBindingId)}-${issuanceBodies.length}-${'x'.repeat(32)}`,
+					token_type: 'DPoP',
+					expires_in: 300,
+					scope: 'rooms:read',
+				});
+			}
+			const token = new Headers(init?.headers).get('authorization') || '';
+			apiTokens.push(token);
+			if (staleBindingOne && token.includes('binding-1')) {
+				staleBindingOne = false;
+				return new Response(null, { status: 401 });
+			}
+			return new Response(null, { status: 200 });
+		});
+		const client = new WorkloadIdentityClient({ brokerRequest: generationBrokerFactory(), fetch: fetchMock });
+		const roomOne = client.forRoom(roomContext('binding-1'));
+		const roomTwo = client.forRoom(roomContext('binding-2'));
+		expect((roomOne as any).getAccessToken).toBeUndefined();
+
+		await Promise.all([
+			roomOne.authorizedRequest('/api/v1/rooms/state', { requiredScope: 'rooms:read' }),
+			roomOne.authorizedRequest('/api/v1/rooms/state', { requiredScope: 'rooms:read' }),
+		]);
+		expect(issuanceBodies.filter((body) => body.authorizationBindingId === 'binding-1')).toHaveLength(1);
+		await roomTwo.authorizedRequest('/api/v1/rooms/state', { requiredScope: 'rooms:read' });
+		expect(issuanceBodies.map((body) => body.authorizationBindingId)).toEqual(['binding-1', 'binding-2']);
+		expect(apiTokens[0]).not.toEqual(apiTokens[2]);
+
+		staleBindingOne = true;
+		await roomOne.authorizedRequest('/api/v1/rooms/state', { requiredScope: 'rooms:read' });
+		await roomTwo.authorizedRequest('/api/v1/rooms/state', { requiredScope: 'rooms:read' });
+		expect(issuanceBodies.map((body) => body.authorizationBindingId)).toEqual(['binding-1', 'binding-2', 'binding-1']);
+	});
+
+	it('rejects room and origin overrides and replays mutations only when explicitly idempotent and replayable', async () => {
+		let apiCalls = 0;
+		const fetchMock = vi.fn(async (request: string | URL | Request, init?: RequestInit) => {
+			const url = String(request);
+			if (url.endsWith('mcp-workload.ready')) return jsonResponse({ status: 'active' });
+			if (url.endsWith('mcp-workload.token')) {
+				return jsonResponse({ access_token: `token-${apiCalls}-${'x'.repeat(32)}`, token_type: 'DPoP', expires_in: 300, scope: 'rooms:write' });
+			}
+			apiCalls += 1;
+			return new Response(null, { status: apiCalls < 4 ? 401 : 200 });
+		});
+		const client = new WorkloadIdentityClient({ brokerRequest: generationBrokerFactory(), fetch: fetchMock });
+		const room = client.forRoom(roomContext('binding-1'));
+		await expect(room.authorizedFetch('https://hub.example/api/v1/write', { method: 'POST', requiredScope: 'rooms:write' }))
+			.rejects.toMatchObject({ code: 'TARGET_ORIGIN_INVALID' });
+		await expect(room.authorizedFetch('/api/v1/write', {
+			method: 'POST', requiredScope: 'rooms:write', authorizationBindingId: 'binding-2',
+		} as any)).rejects.toMatchObject({ code: 'TARGET_ORIGIN_INVALID' });
+
+		expect((await room.authorizedFetch('/api/v1/write', { method: 'POST', requiredScope: 'rooms:write' })).status).toBe(401);
+		expect(apiCalls).toBe(1);
+		expect((await room.authorizedFetch('/api/v1/write', {
+			method: 'PATCH', requiredScope: 'rooms:write', retryMode: 'idempotent',
+		})).status).toBe(401);
+		expect(apiCalls).toBe(2);
+		expect((await room.authorizedFetch('/api/v1/write', {
+			method: 'PATCH', requiredScope: 'rooms:write', retryMode: 'idempotent', replayable: true,
+		})).status).toBe(200);
+		expect(apiCalls).toBe(4);
+	});
+
+	it('rejects forRoom synchronously unless actor, room, and verified child all agree', () => {
+		const client = new WorkloadIdentityClient({ brokerRequest: generationBrokerFactory(), fetch: vi.fn() });
+		expect(() => client.forRoom({ ...roomContext('binding-1'), actor: undefined })).toThrow(WorkloadIdentityError);
+		expect(() => client.forRoom({ ...roomContext('binding-1'), roomId: 'room-2' })).toThrow(WorkloadIdentityError);
+		expect(() => client.forRoom({
+			...roomContext('binding-1'),
+			runtimeAuthorization: { ...roomContext('binding-1').runtimeAuthorization!, authorizationContext: 'workspace' } as any,
+		})).toThrow(WorkloadIdentityError);
 	});
 });

@@ -35,7 +35,7 @@ import type {
 	McpResponse,
 	ParsedInbound,
 } from './protocol/types.js';
-import type { VerifiedRuntimeDispatchAssertionV3 } from './workload/dispatch-assertion.js';
+import type { VerifiedRuntimeAuthorizationV3 } from './workload/dispatch-assertion.js';
 
 export type AppMcpHandler = (
 	request: ApplicationMcpRequest,
@@ -171,7 +171,9 @@ export class AppServerRuntime {
 		credentialResolution?: CallerCredentialResolution;
 		traceId?: string;
 		signal?: AbortSignal;
-		runtimeAuthorization?: VerifiedRuntimeDispatchAssertionV3;
+		runtimeAuthorization?: VerifiedRuntimeAuthorizationV3;
+		/** Per-request verifier pinned by the authenticated workload broker. */
+		auth?: AuthOptions;
 	}): Promise<ToolCallContext> {
 		const descriptor = await this.resolveDescriptor();
 		const base: ToolCallContext = {
@@ -208,13 +210,14 @@ export class AppServerRuntime {
 			return { ...base, identityState: 'invalid' };
 		}
 
-		if (!this.opts.auth) {
+		const auth = input.auth ?? this.opts.auth;
+		if (!auth) {
 			return { ...base, identityState: 'invalid' };
 		}
 
 		const verified = await verifyUserToken(
 			resolution.credential.token,
-			this.opts.auth,
+			auth,
 			resolution.credential.assertedUserId,
 		);
 

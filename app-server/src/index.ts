@@ -120,6 +120,7 @@ export {
 	WorkloadIdentityClient,
 	WorkloadIdentityError,
 	WorkloadPermissionDeniedError,
+	RoomBoundWorkloadClient,
 	getWorkloadIdentityClient,
 } from './workload/workload-identity.js';
 export type {
@@ -128,6 +129,7 @@ export type {
 	WorkloadBrokerContext,
 	WorkloadBrokerResponse,
 	WorkloadFetchInit,
+	RoomBoundWorkloadFetchInit,
 	WorkloadIdentityClientOptions,
 	WorkloadIdentityErrorCode,
 } from './workload/workload-identity.js';
@@ -140,6 +142,7 @@ export {
 	isUnsignedRuntimeReadinessRpcV3,
 	parseRuntimeDispatchTrustV3Json,
 	sha256RuntimeDispatchBodyV3,
+	verifyClusterDispatchAssertionV3,
 	verifyDispatchAssertion,
 	verifyRuntimeDispatchAssertionV3,
 } from './workload/dispatch-assertion.js';
@@ -154,9 +157,11 @@ export type {
 	RuntimeDispatchTrustHintV3,
 	RuntimeDispatchTrustResolverV3,
 	RuntimeDispatchTrustV3,
+	VerifiedClusterDispatchAssertionV3,
 	VerifiedDispatchActor,
 	VerifiedDispatchAssertion,
 	VerifiedRuntimeDispatchAssertionV3,
+	VerifiedRuntimeAuthorizationV3,
 } from './workload/dispatch-assertion.js';
 export {
 	createPinnedPortalJwksResolverV3,
