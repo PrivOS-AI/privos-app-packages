@@ -696,6 +696,32 @@ const CLUSTER_DISPATCH_V3_ROOM_KEYS = [
 	'roomId',
 ] as const;
 
+/**
+ * Claims a Hub may add that an older app would not have known to expect.
+ *
+ * They are optional on the wire in both directions: a Hub that predates the
+ * claim signs none, and a Hub only enriches an assertion for an app whose
+ * manifest declared it can read one. Absence is therefore normal forever and
+ * must never be an error.
+ */
+const CLUSTER_DISPATCH_V3_OPTIONAL_KEYS = ['actor'] as const;
+
+const CLUSTER_DISPATCH_V3_ACTOR_KEYS = ['subject', 'username', 'roomId'] as const;
+
+function validClusterDispatchActorV3(value: unknown): value is VerifiedDispatchActor {
+	if (!isRecord(value)) return false;
+	const extra = Object.keys(value).filter(
+		(key) => !(CLUSTER_DISPATCH_V3_ACTOR_KEYS as readonly string[]).includes(key),
+	);
+	return (
+		extra.length === 0 &&
+		typeof value.subject === 'string' &&
+		value.subject.length >= 1 &&
+		(value.username === undefined || typeof value.username === 'string') &&
+		(value.roomId === undefined || typeof value.roomId === 'string')
+	);
+}
+
 export type VerifiedClusterDispatchAssertionV3 = Readonly<{
 	jti: string;
 	issuedAt: number;
@@ -703,6 +729,15 @@ export type VerifiedClusterDispatchAssertionV3 = Readonly<{
 	authorizationContext: 'workspace' | 'room';
 	roomId?: string;
 	authorizationBindingId?: string;
+	/**
+	 * Who the Hub says initiated this dispatch, when the app declared
+	 * `capabilities.verifiedActor` and a user actually initiated it.
+	 *
+	 * Identity metadata to display or attribute with — it grants nothing. What
+	 * this dispatch is allowed to reach is decided by the room binding and the
+	 * approved permissions, never by this field.
+	 */
+	actor?: VerifiedDispatchActor;
 }>;
 
 /**
@@ -750,8 +785,13 @@ export function verifyClusterDispatchAssertionV3(input: {
 	)) throw new Error('dispatch_assertion_invalid');
 	const now = input.now ?? Math.floor(Date.now() / 1000);
 	const room = payload.authorizationContext === 'room';
+	const presentOptionalKeys = CLUSTER_DISPATCH_V3_OPTIONAL_KEYS.filter((key) => payload[key] !== undefined);
 	if (
-		!exactKeys(payload, room ? CLUSTER_DISPATCH_V3_ROOM_KEYS : CLUSTER_DISPATCH_V3_COMMON_KEYS) ||
+		!exactKeys(payload, [
+			...(room ? CLUSTER_DISPATCH_V3_ROOM_KEYS : CLUSTER_DISPATCH_V3_COMMON_KEYS),
+			...presentOptionalKeys,
+		]) ||
+		(payload.actor !== undefined && !validClusterDispatchActorV3(payload.actor)) ||
 		payload.protocolVersion !== 3 ||
 		payload.type !== 'hub-dispatch-assertion' ||
 		payload.aud !== 'privos-mcp-app' ||
@@ -808,6 +848,7 @@ export function verifyClusterDispatchAssertionV3(input: {
 		expiresAt: Number(payload.exp),
 		authorizationContext: room ? 'room' : 'workspace',
 		...(room ? { roomId: String(payload.roomId), authorizationBindingId: String(payload.authorizationBindingId) } : {}),
+		...(payload.actor !== undefined ? { actor: Object.freeze({ ...(payload.actor as VerifiedDispatchActor) }) } : {}),
 	});
 }
 

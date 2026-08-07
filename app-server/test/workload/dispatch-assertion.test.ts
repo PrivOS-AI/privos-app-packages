@@ -275,6 +275,67 @@ describe('cluster-routed App Library dispatch assertions', () => {
 			verifyClusterDispatchAssertionV3({ compact, body: CLUSTER_V3_BODY, context: replicaContext, now: CLUSTER_V3_NOW }),
 		).toThrow('dispatch_assertion_invalid');
 	});
+
+	it('surfaces the acting user when the Hub signed one', () => {
+		const { compact, context } = clusterDispatchV3({
+			payload: {
+				authorizationContext: 'room',
+				roomId: 'room-1',
+				authorizationBindingId: 'binding-1',
+				bindingReceiptHash: 'F'.repeat(43),
+				bindingEpoch: 1,
+				actor: { subject: 'user-1', username: 'techcomthanh', roomId: 'room-1' },
+			},
+		});
+
+		expect(
+			verifyClusterDispatchAssertionV3({ compact, body: CLUSTER_V3_BODY, context, now: CLUSTER_V3_NOW }).actor,
+		).toEqual({ subject: 'user-1', username: 'techcomthanh', roomId: 'room-1' });
+	});
+
+	it('accepts an actor carrying only the subject', () => {
+		const { compact, context } = clusterDispatchV3({ payload: { actor: { subject: 'user-1' } } });
+
+		expect(
+			verifyClusterDispatchAssertionV3({ compact, body: CLUSTER_V3_BODY, context, now: CLUSTER_V3_NOW }).actor,
+		).toEqual({ subject: 'user-1' });
+	});
+
+	it('reports no actor when the Hub signed none', () => {
+		// Every Hub predating the claim signs none, and an agent-initiated
+		// dispatch never carries one. Absence is normal, not a failure.
+		const { compact, context } = clusterDispatchV3();
+
+		expect(
+			verifyClusterDispatchAssertionV3({ compact, body: CLUSTER_V3_BODY, context, now: CLUSTER_V3_NOW }),
+		).not.toHaveProperty('actor');
+	});
+
+	it.each([
+		['no subject', { username: 'techcomthanh' }],
+		['an empty subject', { subject: '' }],
+		['a non-string subject', { subject: 42 }],
+		['a non-string username', { subject: 'user-1', username: 7 }],
+		['an unknown inner key', { subject: 'user-1', privileged: true }],
+		['a bare string', 'user-1'],
+		['null', null],
+	])('refuses an actor with %s', (_case, actor) => {
+		const { compact, context } = clusterDispatchV3({ payload: { actor } });
+
+		expect(() =>
+			verifyClusterDispatchAssertionV3({ compact, body: CLUSTER_V3_BODY, context, now: CLUSTER_V3_NOW }),
+		).toThrow('dispatch_assertion_invalid');
+	});
+
+	it('still refuses any other unknown claim', () => {
+		// Tolerating the actor must not become tolerating anything: an unknown key
+		// in a signed artifact is exactly what this check exists to catch.
+		const { compact, context } = clusterDispatchV3({ payload: { impersonate: 'admin' } });
+
+		expect(() =>
+			verifyClusterDispatchAssertionV3({ compact, body: CLUSTER_V3_BODY, context, now: CLUSTER_V3_NOW }),
+		).toThrow('dispatch_assertion_invalid');
+	});
 });
 
 describe('protocol-v3 runtime dispatch assertions', () => {
