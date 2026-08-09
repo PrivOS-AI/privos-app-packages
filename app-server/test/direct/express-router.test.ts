@@ -129,6 +129,17 @@ describe('createDirectRouter', () => {
 		expect(manifest.body.name).toBe('ai.privos.demo');
 	});
 
+	it('serves descriptor capabilities from the canonical manifest route', async () => {
+		const app = express();
+		app.use(createDirectRouter({
+			descriptor: { ...descriptor, capabilities: { verifiedActor: true } },
+			handler: async () => ({ tools: [] }),
+		}));
+
+		const manifest = await request(app).get('/.well-known/mcp/manifest.json').expect(200);
+		expect(manifest.body.capabilities).toEqual({ verifiedActor: true });
+	});
+
 	it('returns 202 empty body for notifications/initialized', async () => {
 		const handler = vi.fn();
 		const app = express();

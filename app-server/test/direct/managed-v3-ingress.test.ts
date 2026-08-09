@@ -1,11 +1,8 @@
 import crypto, { type JsonWebKey } from 'node:crypto';
-import http from 'node:http';
-import type { AddressInfo } from 'node:net';
 
 import express from 'express';
-import { exportJWK, generateKeyPair, SignJWT } from 'jose';
 import request from 'supertest';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import type { AppDescriptor } from '../../src/app-descriptor.js';
 import { createDirectRouter } from '../../src/direct/express-router.js';
@@ -28,8 +25,7 @@ const generation = {
 };
 const hubPair = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
 const hubPublicJwk = hubPair.publicKey.export({ format: 'jwk' });
-let actorJwksOrigin = '';
-let actorJwksServer: http.Server;
+const HUB_ORIGIN = 'https://hub.example';
 const canonical = (value: unknown): string => JSON.stringify(canonicalize(value));
 
 function canonicalize(value: unknown): unknown {
@@ -87,7 +83,7 @@ function workloadClient(fetchImplementation?: typeof fetch): WorkloadIdentityCli
 			return {
 				ok: true,
 				attestation,
-				hubOrigin: actorJwksOrigin,
+				hubOrigin: HUB_ORIGIN,
 				hubKid,
 				hubPublicJwk,
 			};
@@ -95,7 +91,11 @@ function workloadClient(fetchImplementation?: typeof fetch): WorkloadIdentityCli
 	});
 }
 
-function dispatchAssertion(body: unknown, context: 'room' | 'workspace' = 'room'): string {
+function dispatchAssertion(
+	body: unknown,
+	context: 'room' | 'workspace' = 'room',
+	extraClaims: Record<string, unknown> = {},
+): string {
 	const now = Math.floor(Date.now() / 1_000);
 	return signEs256(
 		{ alg: 'ES256', kid: hubKid, privos_protocol: 3, typ: 'privos-hub-dispatch+jws' },
@@ -133,41 +133,9 @@ function dispatchAssertion(body: unknown, context: 'room' | 'workspace' = 'room'
 						bindingEpoch: 3,
 					}
 				: {}),
+			...extraClaims,
 		},
 	);
-}
-
-let actorPrivateKey: crypto.KeyObject;
-let actorJwk: Awaited<ReturnType<typeof exportJWK>>;
-
-beforeAll(async () => {
-	const pair = await generateKeyPair('RS256');
-	actorPrivateKey = pair.privateKey as crypto.KeyObject;
-	actorJwk = await exportJWK(pair.publicKey);
-	actorJwk.kid = 'actor-key';
-	actorJwk.alg = 'RS256';
-	actorJwk.use = 'sig';
-	actorJwksServer = http.createServer((_request, response) => {
-		response.setHeader('content-type', 'application/json');
-		response.end(JSON.stringify({ keys: [actorJwk] }));
-	});
-	await new Promise<void>((resolve) => actorJwksServer.listen(0, '127.0.0.1', resolve));
-	actorJwksOrigin = `http://127.0.0.1:${(actorJwksServer.address() as AddressInfo).port}`;
-});
-
-afterAll(async () => new Promise<void>((resolve) => actorJwksServer.close(() => resolve())));
-
-async function actorToken(overrides: { audience?: string; issuer?: string; roomId?: string | null; subject?: string; expired?: boolean } = {}): Promise<string> {
-	return new SignJWT({
-		...(overrides.subject === '' ? {} : { sub: overrides.subject ?? 'user-1' }),
-		...(overrides.roomId === null ? {} : { rid: overrides.roomId ?? 'room-1' }),
-	})
-		.setProtectedHeader({ alg: 'RS256', kid: 'actor-key' })
-		.setIssuer(overrides.issuer ?? actorJwksOrigin)
-		.setAudience(overrides.audience ?? descriptor.id)
-		.setIssuedAt()
-		.setExpirationTime(overrides.expired ? Math.floor(Date.now() / 1_000) - 60 : '5m')
-		.sign(actorPrivateKey);
 }
 
 function appHarness(seen: ToolCallContext[], client = workloadClient()) {
@@ -191,29 +159,44 @@ function appHarness(seen: ToolCallContext[], client = workloadClient()) {
 }
 
 describe('managed Cluster v3 canonical Direct ingress', () => {
-	it('selects the managed header from broker generation and joins the separate actor to the immutable room authorization', async () => {
+	it('admits an actorless managed room dispatch and derives the room workload client from the assertion', async () => {
 		const seen: ToolCallContext[] = [];
 		const client = workloadClient();
 		const app = appHarness(seen, client);
 		const body = { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} };
 		await request(app).post('/mcp')
 			.set('X-PrivOS-Dispatch-Assertion', dispatchAssertion(body))
-			.set('Authorization', `Bearer ${await actorToken()}`)
-			.set('X-MCP-User-Id', 'user-1')
 			.send(body)
 			.expect(200);
 		expect(seen).toHaveLength(1);
 		expect(seen[0]).toMatchObject({
-			identityState: 'verified',
+			identityState: 'missing',
 			roomId: 'room-1',
-			actor: { userId: 'user-1', roomId: 'room-1' },
 			runtimeAuthorization: { authorizationBindingId: 'binding-1', authorizationContext: 'room' },
 		});
+		expect(seen[0]).not.toHaveProperty('actor');
 		expect(Object.isFrozen(seen[0]!.runtimeAuthorization)).toBe(true);
-		expect(Object.isFrozen(seen[0]!.actor)).toBe(true);
-		expect(Object.isFrozen(seen[0]!.actor!.claims)).toBe(true);
 		expect(Object.isFrozen(seen[0])).toBe(true);
 		expect((client.forRoom(seen[0]!) as any).getAccessToken).toBeUndefined();
+	});
+
+	it('surfaces only a signed optional actor as frozen immediate attribution', async () => {
+		const seen: ToolCallContext[] = [];
+		const client = workloadClient();
+		const body = { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} };
+		await request(appHarness(seen, client)).post('/mcp')
+			.set('X-PrivOS-Dispatch-Assertion', dispatchAssertion(body, 'room', {
+				actor: { subject: 'user-1', username: 'alice', roomId: 'room-1' },
+			}))
+			.send(body)
+			.expect(200);
+		expect(seen[0]).toMatchObject({
+			identityState: 'verified',
+			actor: { userId: 'user-1', username: 'alice', roomId: 'room-1' },
+		});
+		expect(Object.isFrozen(seen[0]!.actor)).toBe(true);
+		expect(Object.isFrozen(seen[0]!.actor!.claims)).toBe(true);
+		expect(() => client.forRoom(seen[0]!)).not.toThrow();
 	});
 
 	it('accepts only the exact owning-client context capability minted by managed ingress', async () => {
@@ -223,8 +206,6 @@ describe('managed Cluster v3 canonical Direct ingress', () => {
 		const body = { jsonrpc: '2.0', id: 4, method: 'tools/list', params: {} };
 		await request(appHarness(seen, client)).post('/mcp')
 			.set('X-PrivOS-Dispatch-Assertion', dispatchAssertion(body))
-			.set('Authorization', `Bearer ${await actorToken()}`)
-			.set('X-MCP-User-Id', 'user-1')
 			.send(body)
 			.expect(200);
 		const authentic = seen[0]!;
@@ -255,39 +236,34 @@ describe('managed Cluster v3 canonical Direct ingress', () => {
 		expect(fetchMock).not.toHaveBeenCalled();
 	});
 
-	it('fails closed before the handler for missing, substituted, or ambiguous caller authority', async () => {
-		const body = { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} };
-		const cases: Array<{ token?: string; userId?: string; assertionContext?: 'room' | 'workspace'; bothAssertions?: boolean }> = [
-			{},
-			{ token: await actorToken({ audience: 'other-app' }), userId: 'user-1' },
-			{ token: await actorToken({ issuer: 'https://other-hub.example' }), userId: 'user-1' },
-			{ token: await actorToken({ expired: true }), userId: 'user-1' },
-			{ token: await actorToken({ subject: '' }), userId: 'user-1' },
-			{ token: await actorToken(), userId: 'user-2' },
-			{ token: await actorToken({ roomId: null }), userId: 'user-1' },
-			{ token: await actorToken({ roomId: 'room-2' }), userId: 'user-1' },
-			{ token: await actorToken(), userId: 'user-1', assertionContext: 'workspace' },
-			{ token: await actorToken(), userId: 'user-1', bothAssertions: true },
-		];
-		for (const testCase of cases) {
-			const seen: ToolCallContext[] = [];
-			let pending = request(appHarness(seen)).post('/mcp')
-				.set('X-PrivOS-Dispatch-Assertion', dispatchAssertion(body, testCase.assertionContext ?? 'room'));
-			if (testCase.bothAssertions) pending = pending.set('X-PrivOS-MCP-Dispatch-Assertion', 'other.header.signature');
-			if (testCase.token) pending = pending.set('Authorization', `Bearer ${testCase.token}`);
-			if (testCase.userId) pending = pending.set('X-MCP-User-Id', testCase.userId);
-			await pending.send(body).expect(403);
-			expect(seen).toHaveLength(0);
-		}
+	it.each([
+		['a missing actor subject', { actor: { username: 'alice' } }],
+		['an unknown actor key', { actor: { subject: 'user-1', role: 'admin' } }],
+		['an unknown assertion claim', { callerCredential: 'bearer' }],
+	])('rejects %s before the handler', async (_case, claims) => {
+		const body = { jsonrpc: '2.0', id: 3, method: 'tools/list', params: {} };
+		const seen: ToolCallContext[] = [];
+		await request(appHarness(seen)).post('/mcp')
+			.set('X-PrivOS-Dispatch-Assertion', dispatchAssertion(body, 'room', claims))
+			.send(body)
+			.expect(403);
+		expect(seen).toHaveLength(0);
 	});
 
-	it('rejects duplicate caller header values', async () => {
+	it('rejects an obsolete separate caller channel and ambiguous assertions', async () => {
 		const seen: ToolCallContext[] = [];
-		const body = { jsonrpc: '2.0', id: 3, method: 'tools/list', params: {} };
+		const body = { jsonrpc: '2.0', id: 5, method: 'tools/list', params: {} };
 		await request(appHarness(seen)).post('/mcp')
 			.set('X-PrivOS-Dispatch-Assertion', dispatchAssertion(body))
-			.set('Authorization', [`Bearer ${await actorToken()}`, `Bearer ${await actorToken()}`] as any)
+			.set('Authorization', 'Bearer retired-caller-token')
 			.set('X-MCP-User-Id', 'user-1')
+			.send(body)
+			.expect(403);
+		expect(seen).toHaveLength(0);
+
+		await request(appHarness(seen)).post('/mcp')
+			.set('X-PrivOS-Dispatch-Assertion', dispatchAssertion(body))
+			.set('X-PrivOS-MCP-Dispatch-Assertion', 'other.header.signature')
 			.send(body)
 			.expect(403);
 		expect(seen).toHaveLength(0);

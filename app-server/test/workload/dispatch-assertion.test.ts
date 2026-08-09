@@ -275,6 +275,60 @@ describe('cluster-routed App Library dispatch assertions', () => {
 			verifyClusterDispatchAssertionV3({ compact, body: CLUSTER_V3_BODY, context: replicaContext, now: CLUSTER_V3_NOW }),
 		).toThrow('dispatch_assertion_invalid');
 	});
+
+	it('accepts and freezes an optional signed actor', () => {
+		const { compact, context } = clusterDispatchV3({
+			payload: {
+				authorizationContext: 'room',
+				roomId: 'room-1',
+				authorizationBindingId: 'binding-1',
+				bindingReceiptHash: 'F'.repeat(43),
+				bindingEpoch: 1,
+				actor: { roomId: 'room-1', subject: 'user-1', username: 'alice' },
+			},
+		});
+
+		const verified = verifyClusterDispatchAssertionV3({
+			compact,
+			body: CLUSTER_V3_BODY,
+			context,
+			now: CLUSTER_V3_NOW,
+		});
+		expect(verified.actor).toEqual({ subject: 'user-1', username: 'alice', roomId: 'room-1' });
+		expect(Object.isFrozen(verified.actor)).toBe(true);
+	});
+
+	it('keeps actor absence a normal verified assertion state', () => {
+		const { compact, context } = clusterDispatchV3();
+
+		expect(
+			verifyClusterDispatchAssertionV3({ compact, body: CLUSTER_V3_BODY, context, now: CLUSTER_V3_NOW }),
+		).not.toHaveProperty('actor');
+	});
+
+	it.each([
+		['no subject', { username: 'alice' }],
+		['an empty subject', { subject: '' }],
+		['a non-string subject', { subject: 42 }],
+		['a non-string username', { subject: 'user-1', username: 7 }],
+		['an unknown inner key', { subject: 'user-1', privileged: true }],
+		['a bare string', 'user-1'],
+		['null', null],
+	])('refuses a signed actor with %s', (_case, actor) => {
+		const { compact, context } = clusterDispatchV3({ payload: { actor } });
+
+		expect(() =>
+			verifyClusterDispatchAssertionV3({ compact, body: CLUSTER_V3_BODY, context, now: CLUSTER_V3_NOW }),
+		).toThrow('dispatch_assertion_invalid');
+	});
+
+	it('still refuses every unknown assertion claim', () => {
+		const { compact, context } = clusterDispatchV3({ payload: { impersonate: 'admin' } });
+
+		expect(() =>
+			verifyClusterDispatchAssertionV3({ compact, body: CLUSTER_V3_BODY, context, now: CLUSTER_V3_NOW }),
+		).toThrow('dispatch_assertion_invalid');
+	});
 });
 
 describe('protocol-v3 runtime dispatch assertions', () => {

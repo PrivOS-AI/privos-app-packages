@@ -1,9 +1,8 @@
-import type { ToolCallContext, VerifiedActor } from '../context/tool-call-context.js';
+import type { ToolCallContext } from '../context/tool-call-context.js';
 import type { VerifiedRuntimeAuthorizationV3 } from './dispatch-assertion.js';
 
 export type ManagedIngressRoomAuthority = Readonly<{
 	sourceAuthorization: VerifiedRuntimeAuthorizationV3;
-	sourceActor: VerifiedActor;
 	workspaceId: string;
 	deploymentId: string;
 	generationId: string;
@@ -38,20 +37,14 @@ export function registerManagedIngressRoomAuthority(
 		typeof authorization.bindingReceiptHash !== 'string' ||
 		!Number.isSafeInteger(authorization.bindingEpoch) ||
 		context.runtimeAuthorization !== authorization ||
-		context.identityState !== 'verified' ||
-		!context.actor ||
 		context.roomId !== authorization.roomId ||
-		context.actor.roomId !== authorization.roomId ||
-		!Object.isFrozen(authorization) ||
-		!Object.isFrozen(context.actor) ||
-		!Object.isFrozen(context.actor.claims)
+		!Object.isFrozen(authorization)
 	) {
 		throw new Error('managed_ingress_room_authority_invalid');
 	}
 
 	const authority: ManagedIngressRoomAuthority = Object.freeze({
 		sourceAuthorization: authorization,
-		sourceActor: context.actor,
 		workspaceId: authorization.workspaceId,
 		deploymentId: authorization.deploymentId,
 		generationId: authorization.generationId,

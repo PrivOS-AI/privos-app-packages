@@ -696,6 +696,24 @@ const CLUSTER_DISPATCH_V3_ROOM_KEYS = [
 	'roomId',
 ] as const;
 
+/** Optional signed attribution claims understood by this SDK generation. */
+const CLUSTER_DISPATCH_V3_OPTIONAL_KEYS = ['actor'] as const;
+const CLUSTER_DISPATCH_V3_ACTOR_KEYS = ['subject', 'username', 'roomId'] as const;
+
+function validClusterDispatchActorV3(value: unknown): value is VerifiedDispatchActor {
+	if (!isRecord(value)) return false;
+	const extra = Object.keys(value).filter(
+		(key) => !(CLUSTER_DISPATCH_V3_ACTOR_KEYS as readonly string[]).includes(key),
+	);
+	return (
+		extra.length === 0 &&
+		typeof value.subject === 'string' &&
+		value.subject.length >= 1 &&
+		(value.username === undefined || typeof value.username === 'string') &&
+		(value.roomId === undefined || typeof value.roomId === 'string')
+	);
+}
+
 export type VerifiedClusterDispatchAssertionV3 = Readonly<{
 	verificationPath: 'managed-cluster-v3';
 	protocolVersion: 3;
@@ -720,6 +738,8 @@ export type VerifiedClusterDispatchAssertionV3 = Readonly<{
 	authorizationBindingId?: string;
 	bindingReceiptHash?: string;
 	bindingEpoch?: number;
+	/** Signed immediate attribution only; never workload authority. */
+	actor?: VerifiedDispatchActor;
 }>;
 
 /** Immutable authorization normalized onto ToolCallContext by any v3 ingress. */
@@ -764,8 +784,15 @@ export function verifyClusterDispatchAssertionV3(input: {
 	)) throw new Error('dispatch_assertion_invalid');
 	const now = input.now ?? Math.floor(Date.now() / 1000);
 	const room = payload.authorizationContext === 'room';
+	const presentOptionalKeys = CLUSTER_DISPATCH_V3_OPTIONAL_KEYS.filter(
+		(key) => payload[key] !== undefined,
+	);
 	if (
-		!exactKeys(payload, room ? CLUSTER_DISPATCH_V3_ROOM_KEYS : CLUSTER_DISPATCH_V3_COMMON_KEYS) ||
+		!exactKeys(payload, [
+			...(room ? CLUSTER_DISPATCH_V3_ROOM_KEYS : CLUSTER_DISPATCH_V3_COMMON_KEYS),
+			...presentOptionalKeys,
+		]) ||
+		(payload.actor !== undefined && !validClusterDispatchActorV3(payload.actor)) ||
 		payload.protocolVersion !== 3 ||
 		payload.type !== 'hub-dispatch-assertion' ||
 		payload.aud !== 'privos-mcp-app' ||
@@ -843,6 +870,9 @@ export function verifyClusterDispatchAssertionV3(input: {
 					bindingReceiptHash: String(payload.bindingReceiptHash),
 					bindingEpoch: Number(payload.bindingEpoch),
 				}
+			: {}),
+		...(payload.actor !== undefined
+			? { actor: Object.freeze({ ...(payload.actor as VerifiedDispatchActor) }) }
 			: {}),
 	});
 }

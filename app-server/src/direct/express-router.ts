@@ -6,6 +6,7 @@ import {
 	type AppDescriptor,
 } from '../app-descriptor.js';
 import type { AuthOptions } from '../auth/user-token.js';
+import type { ToolCallContext, VerifiedActor } from '../context/tool-call-context.js';
 import {
 	INVALID_REQUEST,
 	PARSE_ERROR,
@@ -34,9 +35,9 @@ import {
 	verifyDispatchAssertion,
 	verifyRuntimeDispatchAssertionV3,
 	type RuntimeDispatchSecurityV3,
+	type VerifiedDispatchActor,
 	type VerifiedRuntimeAuthorizationV3,
 } from '../workload/dispatch-assertion.js';
-import type { WorkloadBrokerContext } from '../workload/workload-identity.js';
 
 export interface DirectRouterOptions {
 	descriptor: AppDescriptor | (() => AppDescriptor | Promise<AppDescriptor>);
@@ -189,9 +190,8 @@ async function handleMcpPost(
 		: undefined;
 
 	let runtimeAuthorization: VerifiedRuntimeAuthorizationV3 | undefined;
-	let managedBrokerContext: WorkloadBrokerContext | undefined;
 	let managedWorkloadClient: WorkloadIdentityClient | undefined;
-	let callerAuth = options.auth;
+	let managedActor: VerifiedDispatchActor | undefined;
 	const managedAssertionHeaders = rawHeaderValues(req, 'x-privos-dispatch-assertion');
 	const runtimeAssertionHeaders = rawHeaderValues(req, 'x-privos-mcp-dispatch-assertion');
 	const unsupportedRuntimeAffinityHeaders = [
@@ -244,11 +244,10 @@ async function handleMcpPost(
 				if (!assertion) throw new Error('dispatch_assertion_missing');
 				const brokerContext = await workloadClient.brokerContext();
 				if (brokerContext.binding.generation) {
-					runtimeAuthorization = verifyClusterDispatchAssertionV3({ compact: assertion, body, context: brokerContext });
-					managedBrokerContext = brokerContext;
+					const verified = verifyClusterDispatchAssertionV3({ compact: assertion, body, context: brokerContext });
+					runtimeAuthorization = verified;
 					managedWorkloadClient = workloadClient;
-					const descriptor = await runtime.resolveDescriptor();
-					callerAuth = managedHubUserAuth(brokerContext, descriptor.id, options.auth);
+					managedActor = verified.actor;
 				} else {
 					verifyDispatchAssertion({ compact: assertion, body, context: brokerContext });
 				}
@@ -261,8 +260,10 @@ async function handleMcpPost(
 			return;
 		}
 	}
-	const credentialResolution = managedBrokerContext
-		? strictDirectCallerCredential(req)
+	const credentialResolution: CallerCredentialResolution = managedWorkloadClient
+		? rawHeaderValues(req, 'authorization').length > 0 || rawHeaderValues(req, 'x-mcp-user-id').length > 0
+			? { kind: 'error', message: 'Managed v3 attribution is carried only by the signed dispatch assertion' }
+			: { kind: 'absent' }
 		: await resolveCallerCredential(
 				options.extractCallerCredential ??
 					((ingress: { headers: Request['headers'] }) =>
@@ -271,7 +272,7 @@ async function handleMcpPost(
 						)),
 				{ headers: req.headers },
 			);
-	if (managedBrokerContext && credentialResolution.kind === 'error') {
+	if (managedWorkloadClient && credentialResolution.kind === 'error') {
 		denyDispatch(res, requestId);
 		return;
 	}
@@ -281,29 +282,32 @@ async function handleMcpPost(
 		? `mcp-session:${sessionHeader.trim()}`
 		: ephemeralSessionScope('direct');
 
-	let context;
+	let context: ToolCallContext;
 	try {
 		context = await runtime.buildContext({
 			transport: 'direct',
 			requestId,
 			sessionScope,
 			credentialResolution,
-			...(callerAuth ? { auth: callerAuth } : {}),
+			...(options.auth ? { auth: options.auth } : {}),
 			...(runtimeAuthorization ? { runtimeAuthorization } : {}),
 		});
+		if (managedActor && runtimeAuthorization) {
+			if (
+				runtimeAuthorization.authorizationContext === 'room' &&
+				managedActor.roomId !== undefined &&
+				managedActor.roomId !== runtimeAuthorization.roomId
+			) {
+				throw new Error('dispatch_assertion_binding_mismatch');
+			}
+			context = withManagedDispatchActor(context, managedActor);
+		}
 	} catch (error) {
 		if (runtimeAuthorization && error instanceof Error && error.message === 'dispatch_assertion_binding_mismatch') {
 			denyDispatch(res, requestId);
 			return;
 		}
 		throw error;
-	}
-	if (
-		runtimeAuthorization?.authorizationContext === 'room' &&
-		(context.identityState !== 'verified' || !context.actor)
-	) {
-		denyDispatch(res, requestId);
-		return;
 	}
 	const finalizeContext = managedWorkloadClient && runtimeAuthorization?.authorizationContext === 'room'
 		? (requestContext: typeof context) =>
@@ -357,46 +361,25 @@ function rawHeaderValues(req: Request, name: string): string[] {
 	return values;
 }
 
-function strictDirectCallerCredential(req: Request): CallerCredentialResolution {
-	const authorization = rawHeaderValues(req, 'authorization');
-	const assertedUserIds = rawHeaderValues(req, 'x-mcp-user-id');
-	if (authorization.length === 0 && assertedUserIds.length === 0) return { kind: 'absent' };
-	if (authorization.length !== 1 || assertedUserIds.length !== 1) {
-		return { kind: 'error', message: 'Caller credential headers are incomplete or ambiguous' };
-	}
-	const auth = authorization[0]!;
-	const assertedUserId = assertedUserIds[0]!;
-	if (
-		!auth.startsWith('Bearer ') ||
-		auth.slice('Bearer '.length).trim() !== auth.slice('Bearer '.length) ||
-		!/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(auth.slice('Bearer '.length)) ||
-		Buffer.byteLength(auth.slice('Bearer '.length), 'utf8') > 32_768 ||
-		!/^[A-Za-z0-9][A-Za-z0-9._:@-]{0,159}$/.test(assertedUserId)
-	) {
-		return { kind: 'error', message: 'Caller credential headers are malformed' };
-	}
+function withManagedDispatchActor(
+	context: ToolCallContext,
+	actor: VerifiedDispatchActor,
+): ToolCallContext {
+	const claims = Object.freeze({
+		sub: actor.subject,
+		...(actor.username !== undefined ? { preferred_username: actor.username } : {}),
+		...(actor.roomId !== undefined ? { rid: actor.roomId } : {}),
+	});
+	const verifiedActor: VerifiedActor = Object.freeze({
+		userId: actor.subject,
+		...(actor.username !== undefined ? { username: actor.username } : {}),
+		...(actor.roomId !== undefined ? { roomId: actor.roomId } : {}),
+		claims,
+	});
 	return {
-		kind: 'present',
-		credential: {
-			token: auth.slice('Bearer '.length),
-			assertedUserId,
-			source: 'direct-header',
-		},
-	};
-}
-
-function managedHubUserAuth(
-	context: WorkloadBrokerContext,
-	audience: string,
-	base?: AuthOptions,
-): AuthOptions {
-	return {
-		jwksUrl: new URL('/.well-known/mcp-apps/jwks.json', context.hubOrigin),
-		audience,
-		issuer: context.hubOrigin,
-		...(base?.clockToleranceSeconds !== undefined ? { clockToleranceSeconds: base.clockToleranceSeconds } : {}),
-		...(base?.jwksCacheTtlMs !== undefined ? { jwksCacheTtlMs: base.jwksCacheTtlMs } : {}),
-		...(base?.fetchTimeoutMs !== undefined ? { fetchTimeoutMs: base.fetchTimeoutMs } : {}),
+		...context,
+		identityState: 'verified',
+		actor: verifiedActor,
 	};
 }
 

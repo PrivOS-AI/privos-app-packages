@@ -1,12 +1,9 @@
 import crypto, { type JsonWebKey } from 'node:crypto';
-import http from 'node:http';
-import type { AddressInfo } from 'node:net';
 import { inspect } from 'node:util';
 
 import express from 'express';
-import { exportJWK, generateKeyPair, SignJWT } from 'jose';
 import request from 'supertest';
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { createDirectRouter } from '../../src/direct/express-router.js';
 import {
@@ -66,6 +63,7 @@ const binding = (): WorkloadBinding => ({
 });
 
 const APPROVAL_RECEIPT_HASH = 'a'.repeat(43);
+const HUB_ORIGIN = 'https://hub.example';
 const generationHubPair = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
 const generationHubPublicJwk = generationHubPair.publicKey.export({ format: 'jwk' });
 const generationHubKid = crypto.createHash('sha256').update(JSON.stringify({
@@ -166,11 +164,6 @@ function fabricatedRoomContext(bindingId: string, roomId = 'room-1'): ToolCallCo
 	};
 }
 
-let actorJwksOrigin = '';
-let actorJwksServer: http.Server;
-let actorPrivateKey: crypto.KeyObject;
-let actorJwk: Awaited<ReturnType<typeof exportJWK>>;
-
 function canonicalize(value: unknown): unknown {
 	if (Array.isArray(value)) return value.map(canonicalize);
 	if (value && typeof value === 'object') {
@@ -183,28 +176,6 @@ function canonicalize(value: unknown): unknown {
 }
 
 const canonical = (value: unknown): string => JSON.stringify(canonicalize(value));
-
-beforeAll(async () => {
-	const pair = await generateKeyPair('RS256');
-	actorPrivateKey = pair.privateKey as crypto.KeyObject;
-	actorJwk = await exportJWK(pair.publicKey);
-	actorJwk.kid = 'actor-key';
-	actorJwk.alg = 'RS256';
-	actorJwk.use = 'sig';
-	actorJwksServer = http.createServer((incoming, response) => {
-		if (incoming.url === '/.well-known/mcp-apps/jwks.json') {
-			response.setHeader('content-type', 'application/json');
-			response.end(JSON.stringify({ keys: [actorJwk] }));
-			return;
-		}
-		response.statusCode = 404;
-		response.end();
-	});
-	await new Promise<void>((resolve) => actorJwksServer.listen(0, '127.0.0.1', resolve));
-	actorJwksOrigin = `http://127.0.0.1:${(actorJwksServer.address() as AddressInfo).port}`;
-});
-
-afterAll(async () => new Promise<void>((resolve) => actorJwksServer.close(() => resolve())));
 
 function signManagedDispatch(body: unknown, bindingId: string, roomId: string): string {
 	const now = Math.floor(Date.now() / 1_000);
@@ -257,13 +228,6 @@ async function managedRoomContext(
 	bindingId = 'binding-1',
 	roomId = 'room-1',
 ): Promise<ToolCallContext> {
-	const actorToken = await new SignJWT({ sub: 'user-1', rid: roomId })
-		.setProtectedHeader({ alg: 'RS256', kid: 'actor-key' })
-		.setIssuer(actorJwksOrigin)
-		.setAudience('app-1')
-		.setIssuedAt()
-		.setExpirationTime('5m')
-		.sign(actorPrivateKey);
 	const seen: ToolCallContext[] = [];
 	const app = express();
 	app.use(createDirectRouter({
@@ -278,8 +242,6 @@ async function managedRoomContext(
 	const body = { jsonrpc: '2.0', id: crypto.randomUUID(), method: 'tools/list', params: {} };
 	await request(app).post('/mcp')
 		.set('X-PrivOS-Dispatch-Assertion', signManagedDispatch(body, bindingId, roomId))
-		.set('Authorization', `Bearer ${actorToken}`)
-		.set('X-MCP-User-Id', 'user-1')
 		.send(body)
 		.expect(200);
 	return seen[0]!;
@@ -442,7 +404,7 @@ describe('WorkloadIdentityClient', () => {
 			}
 			return new Response(null, { status: 200 });
 		});
-		const client = new WorkloadIdentityClient({ brokerRequest: generationBrokerFactory({}, actorJwksOrigin), fetch: fetchMock });
+		const client = new WorkloadIdentityClient({ brokerRequest: generationBrokerFactory({}, HUB_ORIGIN), fetch: fetchMock });
 		const roomOne = client.forRoom(await managedRoomContext(client, 'binding-1'));
 		const roomTwo = client.forRoom(await managedRoomContext(client, 'binding-2'));
 		expect((roomOne as any).getAccessToken).toBeUndefined();
@@ -475,7 +437,7 @@ describe('WorkloadIdentityClient', () => {
 			apiCalls += 1;
 			return new Response(null, { status: apiCalls < 4 ? 401 : 200 });
 		});
-		const client = new WorkloadIdentityClient({ brokerRequest: generationBrokerFactory({}, actorJwksOrigin), fetch: fetchMock });
+		const client = new WorkloadIdentityClient({ brokerRequest: generationBrokerFactory({}, HUB_ORIGIN), fetch: fetchMock });
 		const room = client.forRoom(await managedRoomContext(client, 'binding-1'));
 		await expect(room.authorizedFetch('https://hub.example/api/v1/write', { method: 'POST', requiredScope: 'rooms:write' }))
 			.rejects.toMatchObject({ code: 'TARGET_ORIGIN_INVALID' });
@@ -557,7 +519,7 @@ describe('WorkloadIdentityClient', () => {
 			return new Response(null, { status: 200 });
 		});
 		const client = new WorkloadIdentityClient({
-			brokerRequest: generationBrokerFactory({}, actorJwksOrigin, () => now),
+			brokerRequest: generationBrokerFactory({}, HUB_ORIGIN, () => now),
 			fetch: fetchMock,
 			now: () => now,
 		});
@@ -606,7 +568,7 @@ describe('WorkloadIdentityClient', () => {
 			return new Response(null, { status: 200 });
 		});
 		const client = new WorkloadIdentityClient({
-			brokerRequest: generationBrokerFactory({}, actorJwksOrigin),
+			brokerRequest: generationBrokerFactory({}, HUB_ORIGIN),
 			fetch: fetchMock,
 		});
 		await client.ensureReady();
@@ -647,7 +609,7 @@ describe('WorkloadIdentityClient', () => {
 			return new Response(null, { status: 200 });
 		});
 		const client = new WorkloadIdentityClient({
-			brokerRequest: generationBrokerFactory({}, actorJwksOrigin),
+			brokerRequest: generationBrokerFactory({}, HUB_ORIGIN),
 			fetch: fetchMock,
 		});
 		await client.ensureReady();
@@ -688,7 +650,7 @@ describe('WorkloadIdentityClient', () => {
 				return new Response(null, { status: 200 });
 			});
 			const client = new WorkloadIdentityClient({
-				brokerRequest: generationBrokerFactory(() => ({ authorizationEpoch }), actorJwksOrigin),
+				brokerRequest: generationBrokerFactory(() => ({ authorizationEpoch }), HUB_ORIGIN),
 				fetch: fetchMock,
 			});
 			await client.ensureReady();
@@ -733,7 +695,7 @@ describe('WorkloadIdentityClient', () => {
 			return new Response(null, { status: 200 });
 		});
 		const client = new WorkloadIdentityClient({
-			brokerRequest: generationBrokerFactory(() => ({ authorizationEpoch }), actorJwksOrigin),
+			brokerRequest: generationBrokerFactory(() => ({ authorizationEpoch }), HUB_ORIGIN),
 			fetch: fetchMock,
 		});
 		expect(await client.getAccessToken()).toContain('epoch-7-token');

@@ -846,7 +846,6 @@ export class WorkloadIdentityClient {
 		if (
 			!privateAuthority ||
 			context.runtimeAuthorization !== privateAuthority.sourceAuthorization ||
-			context.actor !== privateAuthority.sourceActor ||
 			!Object.isFrozen(context)
 		) {
 			throw new WorkloadIdentityError('PERMISSION_DENIED', 'An authentic managed-ingress room context is required.', 403);
