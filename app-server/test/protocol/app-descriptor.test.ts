@@ -26,6 +26,13 @@ const v2Descriptor: AppDescriptor = {
 const v2Permission = v2Descriptor.permissions![0]!;
 
 describe('manifest permission contract v2', () => {
+	it('publishes non-reserved descriptor capabilities through the canonical manifest', () => {
+		expect(buildManifestJson({
+			...v2Descriptor,
+			capabilities: { verifiedActor: true },
+		})).toMatchObject({ capabilities: { verifiedActor: true } });
+	});
+
 	it('emits schema v2 without legacy scopes', () => {
 		const manifest = buildManifestJson(v2Descriptor);
 		expect(manifest.schemaVersion).toBe(2);

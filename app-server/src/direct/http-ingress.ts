@@ -160,7 +160,7 @@ export async function startHttpIngress(
 				const healthPath = options.health?.path ?? '/health';
 				console.log(`${logPrefix}   Health:   ${boundPublicUrl}${healthPath}`);
 			}
-			const workloadClient = getWorkloadIdentityClient();
+			const workloadClient = options.workloadIdentityClient ?? getWorkloadIdentityClient();
 			if (workloadClient.isAvailable() && options.workloadSecurity !== 'disabled') {
 				const bootstrapTimer = setTimeout(() => {
 					void workloadClient.ensureReady().catch(() => {

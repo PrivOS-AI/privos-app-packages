@@ -252,8 +252,51 @@ signed discovery requests as well.
 
 Verified runtime authorization is exposed as the frozen
 `ToolCallContext.runtimeAuthorization`. Room assertions include both the parent
-`runtimeInstallationId` and child `authorizationBindingId`; any separately
-verified actor JWT with a missing or different room is denied.
+`runtimeInstallationId` and child `authorizationBindingId`. A canonical signed
+`actor` claim is optional immediate attribution: when present it is strictly
+parsed, frozen, and surfaced as `ToolCallContext.actor`; when absent the Room
+dispatch remains valid. Actor metadata never selects or authorizes a workload.
+
+Managed App Library generations use this same canonical Direct ingress. The
+router learns the generation from the verified workload broker, accepts only
+`X-PrivOS-Dispatch-Assertion`, verifies it with
+`verifyClusterDispatchAssertionV3`, and obtains any Actor only from that exact
+signed, body-bound assertion. A separate caller bearer or asserted-user header
+is not accepted on this managed-v3 path. Publisher-hosted and self-hosted-local
+v3 runtimes continue to use only `X-PrivOS-MCP-Dispatch-Assertion`. Sending both
+assertion headers or duplicating either header is denied before the handler
+runs.
+Successful managed room ingress also freezes the exact handler context and
+registers a client-private, object-identity capability for it. Public context
+fields are descriptive only and cannot be reconstructed into room authority.
+
+For backend calls that must retain the verified room child-binding, derive a
+request-only client from the tool context:
+
+```ts
+const roomHub = workloadIdentityClient.forRoom(context);
+const response = await roomHub.authorizedRequest('/api/v1/example.read', {
+  method: 'GET',
+  requiredScope: 'example:read',
+});
+```
+
+`forRoom` is synchronous and accepts only the exact managed-ingress context
+instance registered to that `WorkloadIdentityClient`; fabricated objects,
+clones, substituted fields, and contexts from another client are rejected.
+Actor presence or identity is not part of this capability. Its
+client accepts only Hub-relative paths and one exact scope, sends the verified
+`authorizationBindingId` only to workload-token issuance, and does not expose a
+raw token. Exact `roomId` and `authorizationBindingId` keys are reserved in the
+parsed query, nested JSON, `URLSearchParams`, and `FormData`; malformed declared
+JSON/form bodies and opaque streams are rejected before issuance. Strings,
+blobs, and byte buffers with a non-semantic content type remain exact raw
+payloads and are not scanned for coincidental text. Token caching and concurrent
+issuance are isolated by the complete workspace, generation, and room
+receipt/epoch/version identity, with one fixed 64-entry process-local LRU/token
+and active-issuance bound. A 401 evicts only the exact key that supplied the
+attempted token. POST/PATCH replay requires both `retryMode: 'idempotent'` and
+`replayable: true`; safe methods retain one refresh retry.
 
 ## Manifest v2 preflight
 

@@ -122,6 +122,7 @@ export function buildInitializeResult(
 }
 
 export function buildManifestJson(descriptor: AppDescriptor): Record<string, unknown> {
+	validateDescriptorCapabilities(descriptor.capabilities);
 	validateDescriptorPermissions(descriptor);
 	return {
 		schemaVersion: descriptor.permissions ? 2 : 1,
@@ -142,6 +143,7 @@ export function buildManifestJson(descriptor: AppDescriptor): Record<string, unk
 		...(descriptor.homepage ? { homepage: descriptor.homepage } : {}),
 		...(descriptor.scopes ? { scopes: [...descriptor.scopes] } : {}),
 		...(descriptor.permissions ? { permissions: descriptor.permissions.map((permission) => ({ ...permission })) } : {}),
+		...(descriptor.capabilities ? { capabilities: { ...descriptor.capabilities } } : {}),
 	};
 }
 

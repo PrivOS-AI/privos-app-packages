@@ -3,6 +3,7 @@ export {
 	WorkloadIdentityClient,
 	WorkloadIdentityError,
 	WorkloadPermissionDeniedError,
+	RoomBoundWorkloadClient,
 	getWorkloadIdentityClient,
 } from './workload-identity.js';
 export type {
@@ -12,6 +13,7 @@ export type {
 	WorkloadBrokerContext,
 	WorkloadBrokerResponse,
 	WorkloadFetchInit,
+	RoomBoundWorkloadFetchInit,
 	WorkloadIdentityClientOptions,
 	WorkloadIdentityErrorCode,
 } from './workload-identity.js';
@@ -43,6 +45,7 @@ export type {
 	VerifiedDispatchActor,
 	VerifiedDispatchAssertion,
 	VerifiedRuntimeDispatchAssertionV3,
+	VerifiedRuntimeAuthorizationV3,
 } from './dispatch-assertion.js';
 export {
 	createPinnedPortalJwksResolverV3,

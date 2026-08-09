@@ -6,6 +6,7 @@ import {
 	type AppDescriptor,
 } from '../app-descriptor.js';
 import type { AuthOptions } from '../auth/user-token.js';
+import type { ToolCallContext, VerifiedActor } from '../context/tool-call-context.js';
 import {
 	INVALID_REQUEST,
 	PARSE_ERROR,
@@ -18,6 +19,7 @@ import {
 	ephemeralSessionScope,
 	extractDirectCallerCredential,
 	resolveCallerCredential,
+	type CallerCredentialResolution,
 	type AppErrorMapper,
 	type AppMcpHandler,
 	type AppServerRuntimeOptions,
@@ -25,13 +27,16 @@ import {
 	type RuntimeLimits,
 	type UiResourceProvider,
 } from '../runtime.js';
-import { getWorkloadIdentityClient } from '../workload/workload-identity.js';
+import { getWorkloadIdentityClient, type WorkloadIdentityClient } from '../workload/workload-identity.js';
+import { registerManagedIngressRoomAuthority } from '../workload/managed-ingress-authority.js';
 import {
 	isUnsignedRuntimeReadinessRpcV3,
+	verifyClusterDispatchAssertionV3,
 	verifyDispatchAssertion,
 	verifyRuntimeDispatchAssertionV3,
 	type RuntimeDispatchSecurityV3,
-	type VerifiedRuntimeDispatchAssertionV3,
+	type VerifiedDispatchActor,
+	type VerifiedRuntimeAuthorizationV3,
 } from '../workload/dispatch-assertion.js';
 
 export interface DirectRouterOptions {
@@ -58,6 +63,8 @@ export interface DirectRouterOptions {
 	runtime?: AppServerRuntime;
 	/** Require Hub dispatch assertions when the Cluster identity socket is mounted. */
 	workloadSecurity?: 'auto' | 'required' | 'disabled';
+	/** Optional app-owned client; useful when readiness and ingress share one broker session. */
+	workloadIdentityClient?: WorkloadIdentityClient;
 	/** Explicit required final-boundary authorization for local or publisher protocol-v3 runtimes. */
 	runtimeDispatchV3?: RuntimeDispatchSecurityV3;
 }
@@ -182,8 +189,10 @@ async function handleMcpPost(
 		? candidateRequestId
 		: undefined;
 
-	let runtimeAuthorization: VerifiedRuntimeDispatchAssertionV3 | undefined;
-	const legacyAssertionHeaders = rawHeaderValues(req, 'x-privos-dispatch-assertion');
+	let runtimeAuthorization: VerifiedRuntimeAuthorizationV3 | undefined;
+	let managedWorkloadClient: WorkloadIdentityClient | undefined;
+	let managedActor: VerifiedDispatchActor | undefined;
+	const managedAssertionHeaders = rawHeaderValues(req, 'x-privos-dispatch-assertion');
 	const runtimeAssertionHeaders = rawHeaderValues(req, 'x-privos-mcp-dispatch-assertion');
 	const unsupportedRuntimeAffinityHeaders = [
 		...rawHeaderValues(req, 'x-privos-mcp-runtime-installation-id'),
@@ -193,9 +202,17 @@ async function handleMcpPost(
 		denyDispatch(res, requestId);
 		return;
 	}
+	if (
+		managedAssertionHeaders.length > 1 ||
+		runtimeAssertionHeaders.length > 1 ||
+		(managedAssertionHeaders.length > 0 && runtimeAssertionHeaders.length > 0)
+	) {
+		denyDispatch(res, requestId);
+		return;
+	}
 	if (options.runtimeDispatchV3) {
 		try {
-			if (legacyAssertionHeaders.length > 0 || runtimeAssertionHeaders.length > 1) {
+			if (managedAssertionHeaders.length > 0) {
 				throw new Error('dispatch_assertion_ambiguous');
 			}
 			if (runtimeAssertionHeaders.length === 0) {
@@ -218,42 +235,73 @@ async function handleMcpPost(
 			denyDispatch(res, requestId);
 			return;
 		}
-		const workloadClient = getWorkloadIdentityClient();
+		const workloadClient = options.workloadIdentityClient ?? getWorkloadIdentityClient();
 		const workloadSecurity = options.workloadSecurity ?? 'auto';
 		const requireDispatchAssertion = workloadSecurity === 'required' || (workloadSecurity === 'auto' && workloadClient.isAvailable());
 		if (requireDispatchAssertion) {
 			try {
-				const assertion = headerValue(req.headers['x-privos-dispatch-assertion']);
+				const assertion = managedAssertionHeaders[0];
 				if (!assertion) throw new Error('dispatch_assertion_missing');
-				verifyDispatchAssertion({ compact: assertion, body, context: await workloadClient.brokerContext() });
+				const brokerContext = await workloadClient.brokerContext();
+				if (brokerContext.binding.generation) {
+					const verified = verifyClusterDispatchAssertionV3({ compact: assertion, body, context: brokerContext });
+					runtimeAuthorization = verified;
+					managedWorkloadClient = workloadClient;
+					managedActor = verified.actor;
+				} else {
+					verifyDispatchAssertion({ compact: assertion, body, context: brokerContext });
+				}
 			} catch {
 				denyDispatch(res, requestId);
 				return;
 			}
+		} else if (managedAssertionHeaders.length > 0) {
+			denyDispatch(res, requestId);
+			return;
 		}
 	}
-	const extract =
-		options.extractCallerCredential ??
-		((ingress: { headers: Request['headers'] }) =>
-			extractDirectCallerCredential(
-				ingress.headers as Record<string, string | string[] | undefined>,
-			));
-	const credentialResolution = await resolveCallerCredential(extract, { headers: req.headers });
+	const credentialResolution: CallerCredentialResolution = managedWorkloadClient
+		? rawHeaderValues(req, 'authorization').length > 0 || rawHeaderValues(req, 'x-mcp-user-id').length > 0
+			? { kind: 'error', message: 'Managed v3 attribution is carried only by the signed dispatch assertion' }
+			: { kind: 'absent' }
+		: await resolveCallerCredential(
+				options.extractCallerCredential ??
+					((ingress: { headers: Request['headers'] }) =>
+						extractDirectCallerCredential(
+							ingress.headers as Record<string, string | string[] | undefined>,
+						)),
+				{ headers: req.headers },
+			);
+	if (managedWorkloadClient && credentialResolution.kind === 'error') {
+		denyDispatch(res, requestId);
+		return;
+	}
 
 	const sessionHeader = headerValue(req.headers['mcp-session-id']);
 	const sessionScope = sessionHeader?.trim()
 		? `mcp-session:${sessionHeader.trim()}`
 		: ephemeralSessionScope('direct');
 
-	let context;
+	let context: ToolCallContext;
 	try {
 		context = await runtime.buildContext({
 			transport: 'direct',
 			requestId,
 			sessionScope,
 			credentialResolution,
+			...(options.auth ? { auth: options.auth } : {}),
 			...(runtimeAuthorization ? { runtimeAuthorization } : {}),
 		});
+		if (managedActor && runtimeAuthorization) {
+			if (
+				runtimeAuthorization.authorizationContext === 'room' &&
+				managedActor.roomId !== undefined &&
+				managedActor.roomId !== runtimeAuthorization.roomId
+			) {
+				throw new Error('dispatch_assertion_binding_mismatch');
+			}
+			context = withManagedDispatchActor(context, managedActor);
+		}
 	} catch (error) {
 		if (runtimeAuthorization && error instanceof Error && error.message === 'dispatch_assertion_binding_mismatch') {
 			denyDispatch(res, requestId);
@@ -261,8 +309,11 @@ async function handleMcpPost(
 		}
 		throw error;
 	}
-
-	const outcome = await runtime.dispatchObject(body, context);
+	const finalizeContext = managedWorkloadClient && runtimeAuthorization?.authorizationContext === 'room'
+		? (requestContext: typeof context) =>
+			registerManagedIngressRoomAuthority(managedWorkloadClient, requestContext, runtimeAuthorization)
+		: undefined;
+	const outcome = await runtime.dispatchObject(body, context, finalizeContext);
 
 	if (outcome.type === 'no_response' || outcome.type === 'protocol_warning') {
 		res.status(202).end();
@@ -308,6 +359,28 @@ function rawHeaderValues(req: Request, name: string): string[] {
 		if (req.rawHeaders[index]?.toLowerCase() === name) values.push(req.rawHeaders[index + 1] ?? '');
 	}
 	return values;
+}
+
+function withManagedDispatchActor(
+	context: ToolCallContext,
+	actor: VerifiedDispatchActor,
+): ToolCallContext {
+	const claims = Object.freeze({
+		sub: actor.subject,
+		...(actor.username !== undefined ? { preferred_username: actor.username } : {}),
+		...(actor.roomId !== undefined ? { rid: actor.roomId } : {}),
+	});
+	const verifiedActor: VerifiedActor = Object.freeze({
+		userId: actor.subject,
+		...(actor.username !== undefined ? { username: actor.username } : {}),
+		...(actor.roomId !== undefined ? { roomId: actor.roomId } : {}),
+		claims,
+	});
+	return {
+		...context,
+		identityState: 'verified',
+		actor: verifiedActor,
+	};
 }
 
 function denyDispatch(res: Response, requestId: string | number | null | undefined): void {

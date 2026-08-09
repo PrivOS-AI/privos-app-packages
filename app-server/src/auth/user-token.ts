@@ -95,12 +95,12 @@ function actorFromPayload(payload: JWTPayload): VerifiedActor {
 	const username =
 		typeof payload.preferred_username === 'string' ? payload.preferred_username : undefined;
 	const roomId = typeof payload.rid === 'string' ? payload.rid : undefined;
-	return {
+	return Object.freeze({
 		userId: payload.sub,
 		...(username !== undefined ? { username } : {}),
 		...(roomId !== undefined ? { roomId } : {}),
-		claims: { ...payload } as Record<string, unknown>,
-	};
+		claims: Object.freeze({ ...payload }) as Readonly<Record<string, unknown>>,
+	});
 }
 
 /**
@@ -114,6 +114,13 @@ export async function verifyUserToken(
 ): Promise<VerifyUserTokenResult> {
 	if (!token) {
 		return { ok: false, reason: 'missing', message: 'Missing caller token' };
+	}
+	if (
+		Buffer.byteLength(token, 'utf8') > 32_768 ||
+		!/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(token) ||
+		(assertedUserId !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._:@-]{0,159}$/.test(assertedUserId))
+	) {
+		return { ok: false, reason: 'invalid', message: 'Caller credential is malformed' };
 	}
 
 	try {

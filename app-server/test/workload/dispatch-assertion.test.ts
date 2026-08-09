@@ -276,7 +276,7 @@ describe('cluster-routed App Library dispatch assertions', () => {
 		).toThrow('dispatch_assertion_invalid');
 	});
 
-	it('surfaces the acting user when the Hub signed one', () => {
+	it('accepts and freezes an optional signed actor', () => {
 		const { compact, context } = clusterDispatchV3({
 			payload: {
 				authorizationContext: 'room',
@@ -284,26 +284,21 @@ describe('cluster-routed App Library dispatch assertions', () => {
 				authorizationBindingId: 'binding-1',
 				bindingReceiptHash: 'F'.repeat(43),
 				bindingEpoch: 1,
-				actor: { subject: 'user-1', username: 'techcomthanh', roomId: 'room-1' },
+				actor: { roomId: 'room-1', subject: 'user-1', username: 'alice' },
 			},
 		});
 
-		expect(
-			verifyClusterDispatchAssertionV3({ compact, body: CLUSTER_V3_BODY, context, now: CLUSTER_V3_NOW }).actor,
-		).toEqual({ subject: 'user-1', username: 'techcomthanh', roomId: 'room-1' });
+		const verified = verifyClusterDispatchAssertionV3({
+			compact,
+			body: CLUSTER_V3_BODY,
+			context,
+			now: CLUSTER_V3_NOW,
+		});
+		expect(verified.actor).toEqual({ subject: 'user-1', username: 'alice', roomId: 'room-1' });
+		expect(Object.isFrozen(verified.actor)).toBe(true);
 	});
 
-	it('accepts an actor carrying only the subject', () => {
-		const { compact, context } = clusterDispatchV3({ payload: { actor: { subject: 'user-1' } } });
-
-		expect(
-			verifyClusterDispatchAssertionV3({ compact, body: CLUSTER_V3_BODY, context, now: CLUSTER_V3_NOW }).actor,
-		).toEqual({ subject: 'user-1' });
-	});
-
-	it('reports no actor when the Hub signed none', () => {
-		// Every Hub predating the claim signs none, and an agent-initiated
-		// dispatch never carries one. Absence is normal, not a failure.
+	it('keeps actor absence a normal verified assertion state', () => {
 		const { compact, context } = clusterDispatchV3();
 
 		expect(
@@ -312,14 +307,14 @@ describe('cluster-routed App Library dispatch assertions', () => {
 	});
 
 	it.each([
-		['no subject', { username: 'techcomthanh' }],
+		['no subject', { username: 'alice' }],
 		['an empty subject', { subject: '' }],
 		['a non-string subject', { subject: 42 }],
 		['a non-string username', { subject: 'user-1', username: 7 }],
 		['an unknown inner key', { subject: 'user-1', privileged: true }],
 		['a bare string', 'user-1'],
 		['null', null],
-	])('refuses an actor with %s', (_case, actor) => {
+	])('refuses a signed actor with %s', (_case, actor) => {
 		const { compact, context } = clusterDispatchV3({ payload: { actor } });
 
 		expect(() =>
@@ -327,9 +322,7 @@ describe('cluster-routed App Library dispatch assertions', () => {
 		).toThrow('dispatch_assertion_invalid');
 	});
 
-	it('still refuses any other unknown claim', () => {
-		// Tolerating the actor must not become tolerating anything: an unknown key
-		// in a signed artifact is exactly what this check exists to catch.
+	it('still refuses every unknown assertion claim', () => {
 		const { compact, context } = clusterDispatchV3({ payload: { impersonate: 'admin' } });
 
 		expect(() =>

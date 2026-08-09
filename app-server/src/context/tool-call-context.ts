@@ -1,4 +1,4 @@
-import type { VerifiedRuntimeDispatchAssertionV3 } from '../workload/dispatch-assertion.js';
+import type { VerifiedRuntimeAuthorizationV3 } from '../workload/dispatch-assertion.js';
 
 export interface VerifiedActor {
 	/** JWT `sub` — stable opaque user id. */
@@ -22,7 +22,7 @@ export interface ToolCallContext {
 	traceId?: string;
 	identityState: IdentityState;
 	/** Immutable Hub runtime authorization verified at the final HTTP/Relay boundary. */
-	readonly runtimeAuthorization?: VerifiedRuntimeDispatchAssertionV3;
+	readonly runtimeAuthorization?: VerifiedRuntimeAuthorizationV3;
 	/**
 	 * Scope for duplicate in-flight JSON-RPC id detection.
 	 * Direct: MCP-Session-Id or per-request ephemeral id.
