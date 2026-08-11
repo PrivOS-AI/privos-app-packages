@@ -23,6 +23,28 @@ export interface RestResponse<T = any> {
 	body: T;
 }
 
+/** Placeholder geometry, in CSS pixels relative to the app document's own viewport. */
+export interface ProviderEmbedRect {
+	x: number;
+	y: number;
+	width: number;
+	height: number;
+}
+
+/** Why the host refused to render a provider embed. */
+export type ProviderEmbedDenialReason =
+	| 'invalid-url'
+	/** No workspace admin approved this origin for this app. */
+	| 'origin-not-approved'
+	/** The hub's own origin, which a hoisted frame may never point at. */
+	| 'self-origin'
+	/** The app already holds the maximum number of concurrent embeds. */
+	| 'limit-exceeded'
+	/** The app document has not finished loading; re-request after `onhostinitialize`. */
+	| 'not-ready';
+
+export type ProviderEmbedDecision = { granted: true; embedId: string } | { granted: false; reason: ProviderEmbedDenialReason };
+
 /** Params for a multipart file upload to file management (requires files:write). */
 export interface UploadFileParams {
 	channelId: string;
@@ -62,12 +84,40 @@ export interface McpApp {
 	 * open; miss that window and it takes the surface back.
 	 */
 	setChatOpen(open: boolean): Promise<{ ok: true }>;
+	/**
+	 * Ask the host to render a provider embed over a placeholder in this document.
+	 *
+	 * The app cannot iframe YouTube or Figma itself: this document runs in an opaque origin and
+	 * those providers refuse to initialize there. The host renders the frame instead, outside
+	 * this sandbox, but only for an origin a workspace admin approved for this app — the URL is
+	 * reparsed and re-authorized there, so nothing sent here confers permission.
+	 *
+	 * A refusal comes back as `{ granted: false, reason }`, not a rejection. Prefer
+	 * `useProviderEmbed`, which drives this whole handshake.
+	 */
+	requestProviderEmbed(url: string, rect: ProviderEmbedRect): Promise<ProviderEmbedDecision>;
+	/** Tell the host the placeholder moved or resized. Fire-and-forget, safe at scroll rate. */
+	setProviderEmbedRect(embedId: string, rect: ProviderEmbedRect): void;
+	/** Give up an embed. Fire-and-forget; the host also drops everything on document reload. */
+	teardownProviderEmbed(embedId: string): void;
 	onhostcontextchanged?: (ctx: any) => void;
 	/**
 	 * The host (re)initialized this iframe. Anything the host tracks per mount — notably chat
 	 * surface ownership — is cleared at this point and must be claimed again.
+	 *
+	 * Single-slot and write-only, so two features cannot both listen. Prefer
+	 * `subscribeHostInitialize`; this stays for apps already using it.
 	 */
 	onhostinitialize?: (() => void) | undefined;
+	/**
+	 * Subscribe to host (re)initialization; returns an unsubscribe function.
+	 *
+	 * Exists because more than one feature now needs this signal — chat-surface ownership and
+	 * hoisted provider embeds are both cleared by the host per document, and both must re-claim.
+	 * Optional so a custom `McpApp` implementation predating it still type-checks; callers fall
+	 * back to `onhostinitialize` when it is absent.
+	 */
+	subscribeHostInitialize?(handler: () => void): () => void;
 	/** The user clicked the hub launcher — open your chat window and report `setChatOpen(true)`. */
 	onhostchatopen?: (() => void) | undefined;
 	/** The host needs your chat closed (its tab went inactive, or it took the surface back). */
@@ -154,8 +204,15 @@ function createDefaultApp(): McpApp {
 	// ---------------------------------------------------------------------------
 
 	let initializeHandler: (() => void) | undefined;
+	const initializeSubscribers = new Set<() => void>();
 	let chatOpenHandler: (() => void) | undefined;
 	let chatCloseHandler: ((reason: string) => void) | undefined;
+
+	const notifyHostInitialize = () => {
+		initializeHandler?.();
+		// Copied before iterating: a handler may unsubscribe itself while re-claiming.
+		[...initializeSubscribers].forEach((handler) => handler());
+	};
 
 	const handleMessage = (event: MessageEvent) => {
 			// Only trust the host bridge (parent frame). Rejecting other sources stops a
@@ -169,7 +226,7 @@ function createDefaultApp(): McpApp {
 		// ever follow a user action, so the listener registered by connect() is always in place.
 		if (data.id === undefined) {
 			try {
-				if (data.method === 'ui/initialize') initializeHandler?.();
+				if (data.method === 'ui/initialize') notifyHostInitialize();
 				else if (data.method === 'ui/chat.open') chatOpenHandler?.();
 				else if (data.method === 'ui/chat.close') chatCloseHandler?.(String(data.params?.reason ?? ''));
 			} catch {
@@ -192,6 +249,11 @@ function createDefaultApp(): McpApp {
 	// tools/call default is above typical server-side fetch timeouts (20s) so the
 	// app can surface a real upstream error instead of a generic bridge timeout.
 	const DEFAULT_TOOLS_CALL_TIMEOUT_MS = 30_000;
+	/** JSON-RPC notification — no id, so the host never replies and nothing is pending. */
+	const sendNotification = (method: string, params: any): void => {
+		window.parent.postMessage({ jsonrpc: '2.0', method, params }, '*');
+	};
+
 	const sendRequest = (method: string, params: any, timeoutMs = 10000): Promise<any> => {
 		const id = nextId++;
 		return new Promise((resolve, reject) => {
@@ -249,8 +311,25 @@ function createDefaultApp(): McpApp {
 		setChatOpen(open: boolean) {
 			return sendRequest('host/chat.state', { open }, 5000);
 		},
+		requestProviderEmbed(url: string, rect: ProviderEmbedRect) {
+			return sendRequest('host/embed.request', { url, rect }, 5000);
+		},
+		setProviderEmbedRect(embedId: string, rect: ProviderEmbedRect) {
+			// A notification, not a request: these arrive at scroll rate and a round trip per frame
+			// would cost more than the update is worth.
+			sendNotification('host/embed.rect', { embedId, rect });
+		},
+		teardownProviderEmbed(embedId: string) {
+			sendNotification('host/embed.teardown', { embedId });
+		},
 		set onhostinitialize(handler: (() => void) | undefined) {
 			initializeHandler = handler;
+		},
+		subscribeHostInitialize(handler: () => void) {
+			initializeSubscribers.add(handler);
+			return () => {
+				initializeSubscribers.delete(handler);
+			};
 		},
 		set onhostchatopen(handler: (() => void) | undefined) {
 			chatOpenHandler = handler;

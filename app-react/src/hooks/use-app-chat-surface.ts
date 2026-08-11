@@ -84,7 +84,10 @@ export function useAppChatSurface(options: UseAppChatSurfaceOptions = {}): UseAp
 		// this effect's first claim — a deferred module script runs before the `load` event that
 		// drives it. Claiming again here is what makes ownership survive both the first load and
 		// any later reload, instead of depending on which of the two arrives first.
-		app.onhostinitialize = () => claim();
+		// Subscribe rather than take the single `onhostinitialize` slot: hoisted provider embeds
+		// need the same signal, and whichever hook mounted last would otherwise silently win it.
+		const unsubscribe = app.subscribeHostInitialize?.(() => claim());
+		if (!unsubscribe) app.onhostinitialize = () => claim();
 		app.onhostchatopen = () => {
 			optionsRef.current.onOpen?.();
 			// Ack on the author's behalf: forgetting it would trip the host's watchdog, which
@@ -103,7 +106,8 @@ export function useAppChatSurface(options: UseAppChatSurfaceOptions = {}): UseAp
 
 		return () => {
 			active = false;
-			app.onhostinitialize = undefined;
+			if (unsubscribe) unsubscribe();
+			else app.onhostinitialize = undefined;
 			app.onhostchatopen = undefined;
 			app.onhostchatclose = undefined;
 			app.registerChatSurface(false).catch(() => undefined);
