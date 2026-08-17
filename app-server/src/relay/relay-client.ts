@@ -13,6 +13,10 @@ import {
 	jsonRpcError,
 } from '../protocol/errors.js';
 import {
+	buildHubUserTokenAuthOptions,
+	extractRelayUserTokenCredential,
+} from './hub-user-token-actor.js';
+import {
 	AppServerRuntime,
 	DEFAULT_MAX_MESSAGE_BYTES,
 	relayCallerAuthSurface,
@@ -27,9 +31,20 @@ import {
 } from '../runtime.js';
 import { MessageTooLargeError, rawDataToText } from './message-adapter.js';
 import {
+	isStandaloneControlMethod,
+	type StandaloneRelayIdentityController,
+} from './standalone-control.js';
+import {
+	saveStandaloneIdentity,
+	standaloneHubFingerprint,
+	type StandaloneIdentityV2,
+} from './standalone-identity.js';
+import {
+	assertRuntimeDispatchTrustConfigurationV3,
 	extractRuntimeDispatchRelayEnvelopeV3,
 	verifyRuntimeDispatchAssertionV3,
 	type RuntimeDispatchSecurityV3,
+	type RuntimeDispatchTrustV3,
 	type VerifiedRuntimeDispatchAssertionV3,
 } from '../workload/dispatch-assertion.js';
 
@@ -47,6 +62,26 @@ export interface PairingResult {
 	clientId: string;
 	clientSecret: string;
 	mcpAppId?: string;
+	/** Present only when the Hub replied with pairing payload v2 (Hub dispatch trust bootstrap). */
+	pairingVersion?: 2;
+	trust?: RuntimeDispatchTrustV3;
+	/** `SHA256:<hubKid>` — print/compare out-of-band, SSH-host-key style. */
+	fingerprint?: string;
+	/** Absolute path the standalone identity file was written to, when persisted. */
+	identityFilePath?: string;
+}
+
+export interface PairOverWebSocketOptions {
+	timeoutMs?: number;
+	/**
+	 * Persist a v2 pairing result as a standalone identity file. Default `true`
+	 * — set `false` only when the caller manages persistence itself.
+	 */
+	persistIdentityFile?: boolean;
+	/** Overrides `PRIVOS_STANDALONE_IDENTITY_FILE` / the SDK default. */
+	identityFilePath?: string;
+	/** Receives the fingerprint line for out-of-band operator verification; defaults to `console.log`. */
+	onFingerprint?: (fingerprint: string) => void;
 }
 
 const BACKOFF_MS = [1_000, 2_000, 5_000, 10_000, 30_000] as const;
@@ -56,8 +91,13 @@ const DEFAULT_OPEN_HANDSHAKE_TIMEOUT_MS = 15_000;
 
 export interface RelayClientOptions {
 	privosUrl: string;
-	clientId: string;
-	clientSecret: string;
+	/**
+	 * Required unless `standaloneIdentity` is given, in which case live
+	 * credentials are read from the controller on every token request
+	 * (rotation-safe) and these are ignored.
+	 */
+	clientId?: string;
+	clientSecret?: string;
 	descriptor: AppDescriptor | (() => AppDescriptor | Promise<AppDescriptor>);
 	handler: AppMcpHandler;
 	ui?: UiResourceProvider;
@@ -77,8 +117,33 @@ export interface RelayClientOptions {
 	fetchImpl?: typeof fetch;
 	WebSocketImpl?: typeof WebSocket;
 	runtime?: AppServerRuntime;
-	/** Explicit required final-boundary authorization for protocol-v3 publisher Relay traffic. */
+	/**
+	 * Explicit required final-boundary authorization for protocol-v3 publisher
+	 * Relay traffic. Ignored when `standaloneIdentity` is given — its pinned
+	 * trust is used instead, kept live across trust rotation.
+	 */
 	runtimeDispatchV3?: RuntimeDispatchSecurityV3;
+	/**
+	 * Standalone-production identity source (phase 3 pairing). When set, this
+	 * is the sole source of Relay OAuth credentials and dispatch trust —
+	 * `clientId` / `clientSecret` / `runtimeDispatchV3` are ignored — and
+	 * `notifications/privos.standalone*` control messages (secret rotation,
+	 * trust rotation, capabilities push) are handled automatically.
+	 */
+	standaloneIdentity?: StandaloneRelayIdentityController;
+	/**
+	 * Verify the Hub-signed RS256 user token carried at `_meta.privosUser` and
+	 * populate `context.actor` for protocol-v3 runtime dispatch
+	 * (`SELF_HOSTED_LOCAL` / `PUBLISHER_HOSTED`) — the assertion itself has no
+	 * `actor` claim on this path, so this is the only signed source of caller
+	 * identity Relay apps have. Default `'auto'`: wired in automatically using
+	 * `privosUrl` as the Hub origin and this app's own `mcpAppId` as audience
+	 * whenever `standaloneIdentity` is set, or `runtimeDispatchV3.trust` is a
+	 * static (non-resolver) trust record — and only when the caller has not
+	 * already supplied `auth` / `extractCallerCredential`. Set `'disabled'` to
+	 * opt out entirely.
+	 */
+	hubUserTokenAuth?: 'auto' | 'disabled';
 }
 
 export interface RelayHandle {
@@ -86,19 +151,29 @@ export interface RelayHandle {
 	stop(): Promise<void>;
 	/** Resolves when the first successful connection opens (or rejects if stopped first). */
 	whenConnected(): Promise<void>;
+	/** True only while the current WebSocket is open past the authenticated handshake. */
+	isConnected(): boolean;
 }
 
 /**
  * Pair with Privos using a one-time pairing URL.
- * Does not persist credentials — caller is responsible for saving them.
+ *
+ * A v1 Hub response (no `pairingVersion`) behaves exactly as before: credentials
+ * are returned only, and the caller is responsible for saving them. A v2 Hub
+ * response additionally carries Hub dispatch trust; by default this function
+ * validates it and persists ONE standalone identity file (mode `0600`, `wx` on
+ * create — same discipline as the Hub's own identity file), then prints the
+ * Hub fingerprint for out-of-band operator verification. Set
+ * `persistIdentityFile: false` to opt out and handle persistence yourself.
  */
 export function pairOverWebSocket(
 	pairUrl: string,
 	appMeta: PairAppMeta,
 	WebSocketImpl: typeof WebSocket = WebSocket,
-	options?: { timeoutMs?: number },
+	options?: PairOverWebSocketOptions,
 ): Promise<PairingResult> {
 	const timeoutMs = options?.timeoutMs ?? DEFAULT_PAIRING_TIMEOUT_MS;
+	const persistIdentityFile = options?.persistIdentityFile ?? true;
 
 	return new Promise((resolve, reject) => {
 		const ws = new WebSocketImpl(pairUrl);
@@ -121,6 +196,59 @@ export function pairOverWebSocket(
 				reject(new Error(`Pairing timed out after ${timeoutMs}ms`));
 			});
 		}, timeoutMs);
+
+		async function finishPairing(input: {
+			privosUrl: string;
+			clientId: string;
+			clientSecret: string;
+			mcpAppId?: string;
+			pairingVersion?: number;
+			trust?: unknown;
+			fingerprint?: string;
+		}): Promise<PairingResult> {
+			if (input.pairingVersion !== 2) {
+				// v1 Hub — additive-only, unchanged behavior: no trust, no persistence.
+				return {
+					privosUrl: input.privosUrl,
+					clientId: input.clientId,
+					clientSecret: input.clientSecret,
+					mcpAppId: input.mcpAppId,
+				};
+			}
+			assertRuntimeDispatchTrustConfigurationV3(input.trust);
+			const trust = input.trust;
+			const fingerprint = standaloneHubFingerprint(trust.hubKid);
+			if (input.fingerprint !== undefined && input.fingerprint !== fingerprint) {
+				throw new Error('Pairing response fingerprint does not match the pinned Hub key.');
+			}
+			(options?.onFingerprint ?? ((line: string) => console.log(line)))(
+				`PrivOS Hub fingerprint: ${fingerprint} — verify this out-of-band before trusting dispatch from this Hub.`,
+			);
+			let identityFilePath: string | undefined;
+			if (persistIdentityFile) {
+				const identity: StandaloneIdentityV2 = {
+					pairingVersion: 2,
+					relayUrl: input.privosUrl,
+					clientId: input.clientId,
+					clientSecret: input.clientSecret,
+					trust,
+					fingerprint,
+					...(input.mcpAppId ? { mcpAppId: input.mcpAppId } : {}),
+					pairedAt: Date.now(),
+				};
+				identityFilePath = await saveStandaloneIdentity(identity, { filePath: options?.identityFilePath });
+			}
+			return {
+				privosUrl: input.privosUrl,
+				clientId: input.clientId,
+				clientSecret: input.clientSecret,
+				mcpAppId: input.mcpAppId,
+				pairingVersion: 2,
+				trust,
+				fingerprint,
+				...(identityFilePath ? { identityFilePath } : {}),
+			};
+		}
 
 		ws.on('open', () => {
 			try {
@@ -153,6 +281,9 @@ export function pairOverWebSocket(
 						mcpAppId?: string;
 						appId?: string;
 						app?: { _id?: string };
+						pairingVersion?: number;
+						trust?: unknown;
+						fingerprint?: string;
 					};
 				};
 				if (msg.error) {
@@ -160,7 +291,8 @@ export function pairOverWebSocket(
 					return;
 				}
 				if (msg.result?.paired) {
-					const { clientId, clientSecret, relayUrl, app, mcpAppId, appId } = msg.result;
+					const { clientId, clientSecret, relayUrl, app, mcpAppId, appId, pairingVersion, trust, fingerprint } =
+						msg.result;
 					if (!clientId || !clientSecret || !relayUrl) {
 						settle(() => reject(new Error('Pairing response missing credentials')));
 						return;
@@ -173,14 +305,20 @@ export function pairOverWebSocket(
 						(typeof appId === 'string' && appId) ||
 						(typeof app?._id === 'string' && app._id) ||
 						undefined;
-					settle(() =>
-						resolve({
+
+					settle(() => {
+						void finishPairing({
 							privosUrl,
 							clientId,
 							clientSecret,
 							mcpAppId: resolvedAppId,
-						}),
-					);
+							pairingVersion,
+							trust,
+							fingerprint,
+						})
+							.then(resolve)
+							.catch(reject);
+					});
 					try {
 						ws.close();
 					} catch {
@@ -215,7 +353,7 @@ export async function pairFromDescriptor(
 	pairUrl: string,
 	descriptor: AppDescriptor,
 	WebSocketImpl?: typeof WebSocket,
-	options?: { timeoutMs?: number },
+	options?: PairOverWebSocketOptions,
 ): Promise<PairingResult> {
 	return pairOverWebSocket(
 		pairUrl,
@@ -230,15 +368,51 @@ export async function pairFromDescriptor(
  * single reconnect timer, and explicit stop().
  */
 export function connectRelay(opts: RelayClientOptions): RelayHandle {
+	if (!opts.standaloneIdentity && (!opts.clientId || !opts.clientSecret)) {
+		throw new Error('connectRelay requires clientId and clientSecret, or a standaloneIdentity controller.');
+	}
 	const fetchImpl = opts.fetchImpl ?? fetch;
 	const WebSocketImpl = opts.WebSocketImpl ?? WebSocket;
+	const effectiveRuntimeDispatchV3: RuntimeDispatchSecurityV3 | undefined = opts.standaloneIdentity
+		? {
+				mode: 'required',
+				trust: () => opts.standaloneIdentity!.getTrust(),
+			}
+		: opts.runtimeDispatchV3;
+
+	// `mcpAppId` is only known synchronously (without racing an async
+	// descriptor resolution) when it comes from already-loaded dispatch trust:
+	// standalone identity (rotation-safe via `getTrust()`) or a static
+	// (non-resolver) `runtimeDispatchV3.trust`. A dynamic trust resolver has no
+	// single app-wide `mcpAppId` to pin ahead of the first verified dispatch,
+	// so auto-wiring is skipped for that case — the app can still call
+	// `buildHubUserTokenAuthOptions` / `extractRelayUserTokenCredential` itself.
+	const staticTrustAffinity =
+		opts.runtimeDispatchV3 && typeof opts.runtimeDispatchV3.trust !== 'function'
+			? opts.runtimeDispatchV3.trust.affinity
+			: undefined;
+	const hubUserTokenAudience: string | (() => string) | undefined = opts.standaloneIdentity
+		? () => opts.standaloneIdentity!.getTrust().affinity.mcpAppId
+		: staticTrustAffinity?.mcpAppId;
+	const autoHubUserTokenAuth =
+		(opts.hubUserTokenAuth ?? 'auto') === 'auto' &&
+		!opts.auth &&
+		!opts.extractCallerCredential &&
+		hubUserTokenAudience !== undefined;
+	const effectiveAuth: AuthOptions | undefined = autoHubUserTokenAuth
+		? buildHubUserTokenAuthOptions({ hubOrigin: opts.privosUrl, audience: hubUserTokenAudience! })
+		: opts.auth;
+	const effectiveExtractCallerCredential = autoHubUserTokenAuth
+		? extractRelayUserTokenCredential
+		: opts.extractCallerCredential;
+
 	const runtime =
 		opts.runtime ??
 		new AppServerRuntime({
 			descriptor: opts.descriptor,
 			handler: opts.handler,
 			ui: opts.ui,
-			auth: opts.auth,
+			auth: effectiveAuth,
 			mapAppError: opts.mapAppError,
 			limits: opts.limits,
 			logger: opts.logger,
@@ -255,6 +429,7 @@ export function connectRelay(opts: RelayClientOptions): RelayHandle {
 
 	let stopped = false;
 	let activeWs: WebSocket | null = null;
+	let wsAuthenticated = false;
 	let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 	let openHandshakeTimer: ReturnType<typeof setTimeout> | null = null;
 	let backoffIndex = 0;
@@ -307,10 +482,13 @@ export function connectRelay(opts: RelayClientOptions): RelayHandle {
 	};
 
 	async function getAccessToken(signal: AbortSignal): Promise<string> {
+		const credentials = opts.standaloneIdentity
+			? opts.standaloneIdentity.getCredentials()
+			: { clientId: opts.clientId!, clientSecret: opts.clientSecret! };
 		const res = await fetchImpl(`${opts.privosUrl}/oauth/token`, {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-			body: `grant_type=client_credentials&client_id=${encodeURIComponent(opts.clientId)}&client_secret=${encodeURIComponent(opts.clientSecret)}`,
+			body: `grant_type=client_credentials&client_id=${encodeURIComponent(credentials.clientId)}&client_secret=${encodeURIComponent(credentials.clientSecret)}`,
 			signal,
 		});
 		if (!res.ok) throw new Error(`OAuth token failed: ${res.status} ${res.statusText}`);
@@ -373,6 +551,7 @@ export function connectRelay(opts: RelayClientOptions): RelayHandle {
 					return;
 				}
 				backoffIndex = 0;
+				wsAuthenticated = true;
 				log('relay.connected', { generation });
 				if (!connectedOnce) {
 					connectedOnce = true;
@@ -401,7 +580,10 @@ export function connectRelay(opts: RelayClientOptions): RelayHandle {
 			ws.on('close', (code) => {
 				clearOpenHandshakeTimer();
 				log('relay.disconnected', { code, generation });
-				if (activeWs === ws) activeWs = null;
+				if (activeWs === ws) {
+					activeWs = null;
+					wsAuthenticated = false;
+				}
 				if (!stopped && generation === connectGeneration) {
 					scheduleReconnect();
 				}
@@ -514,6 +696,25 @@ export function connectRelay(opts: RelayClientOptions): RelayHandle {
 			parsedJson && typeof parsedJson === 'object' && !Array.isArray(parsedJson)
 				? (parsedJson as Record<string, unknown>)
 				: {};
+
+		// Standalone-production control channel: secret rotation, trust rotation,
+		// and capabilities push arrive as reserved notifications on this same
+		// authenticated connection. They are never MCP dispatch and are handled
+		// (verified against the currently pinned Hub key) before anything else.
+		if (opts.standaloneIdentity && isStandaloneControlMethod(transportMsgObj.method)) {
+			try {
+				await opts.standaloneIdentity.handleControlNotification(transportMsgObj.method, transportMsgObj.params);
+				log('relay.standalone_control.applied', { generation, method: transportMsgObj.method });
+			} catch (err) {
+				log('relay.standalone_control.rejected', {
+					generation,
+					method: transportMsgObj.method,
+					message: err instanceof Error ? err.message : String(err),
+				});
+			}
+			return;
+		}
+
 		let dispatchObject: unknown = parsedJson;
 		let runtimeAuthorization: VerifiedRuntimeDispatchAssertionV3 | undefined;
 		const isRequest = typeof transportMsgObj.method === 'string';
@@ -522,7 +723,7 @@ export function connectRelay(opts: RelayClientOptions): RelayHandle {
 		const hasRuntimeAuthorization = Boolean(
 			transportMeta && Object.prototype.hasOwnProperty.call(transportMeta, 'privosAuthorization'),
 		);
-		if (isRequest && opts.runtimeDispatchV3) {
+		if (isRequest && effectiveRuntimeDispatchV3) {
 			try {
 				if (hasTopLevelRuntimeMetadata(transportMsgObj)) {
 					throw new Error('dispatch_assertion_ambiguous');
@@ -534,7 +735,7 @@ export function connectRelay(opts: RelayClientOptions): RelayHandle {
 					runtimeAuthorization = await verifyRuntimeDispatchAssertionV3({
 						compact: envelope.authorization.assertion,
 						body: envelope.logicalRpc,
-						security: opts.runtimeDispatchV3,
+						security: effectiveRuntimeDispatchV3,
 						relayAuthorization: envelope.authorization,
 					});
 					dispatchObject = envelope.logicalRpc;
@@ -554,7 +755,7 @@ export function connectRelay(opts: RelayClientOptions): RelayHandle {
 
 		const authSurface = relayCallerAuthSurface(transportMsgObj);
 		const credentialResolution = await resolveCallerCredential(
-			opts.extractCallerCredential,
+			effectiveExtractCallerCredential,
 			authSurface,
 		);
 
@@ -612,8 +813,10 @@ export function connectRelay(opts: RelayClientOptions): RelayHandle {
 
 	return {
 		whenConnected: () => connectedPromise,
+		isConnected: () => wsAuthenticated && activeWs !== null && activeWs.readyState === WebSocketImpl.OPEN,
 		async stop() {
 			stopped = true;
+			wsAuthenticated = false;
 			clearReconnectTimer();
 			clearOpenHandshakeTimer();
 			connectGeneration += 1;

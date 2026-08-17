@@ -58,6 +58,7 @@ function resolveIssuer(value: string | readonly string[] | undefined): string | 
 
 function getJwks(options: AuthOptions): ReturnType<typeof createRemoteJWKSet> {
 	const url = resolveUrl(options.jwksUrl);
+	assertProductionSafeJwksUrl(url);
 	const cacheKey = `${url.toString()}|${options.jwksCacheTtlMs ?? ''}|${options.fetchTimeoutMs ?? ''}`;
 	let jwks = jwksCache.get(cacheKey);
 	if (!jwks) {
@@ -100,7 +101,20 @@ function actorFromPayload(payload: JWTPayload): VerifiedActor {
 		...(username !== undefined ? { username } : {}),
 		...(roomId !== undefined ? { roomId } : {}),
 		claims: Object.freeze({ ...payload }) as Readonly<Record<string, unknown>>,
+		provenance: 'user-token',
 	});
+}
+
+/**
+ * A plaintext-HTTP JWKS origin lets any on-path attacker swap the public key
+ * an app verifies caller tokens against. Refuse it once `NODE_ENV=production`
+ * — thrown here, it is always caught by `verifyUserToken`'s try/catch and
+ * degrades to `{ ok: false, reason: 'invalid' }`, never a crash.
+ */
+function assertProductionSafeJwksUrl(url: URL): void {
+	if (process.env.NODE_ENV === 'production' && url.protocol !== 'https:') {
+		throw new Error('Refusing a plaintext-HTTP JWKS origin in production.');
+	}
 }
 
 /**

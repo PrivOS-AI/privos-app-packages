@@ -257,6 +257,68 @@ Verified runtime authorization is exposed as the frozen
 parsed, frozen, and surfaced as `ToolCallContext.actor`; when absent the Room
 dispatch remains valid. Actor metadata never selects or authorizes a workload.
 
+### Relay actor identity (Hub-signed user token)
+
+The `hub-runtime-dispatch-assertion` (Relay/Direct `SELF_HOSTED_LOCAL` /
+`PUBLISHER_HOSTED`) has no `actor` claim — only the managed-Cluster assertion
+variant does. Instead the Hub sends caller identity for these apps as a
+separate short-lived RS256 JWT at `params._meta.privosUser.userToken`,
+verifiable against the Hub's published JWKS
+(`/.well-known/mcp-apps/jwks.json`). The plain `userId` / `username` /
+`roomId` fields riding alongside that token are not proof of anything; only
+the signed token is.
+
+`connectRelay` verifies this token and populates `ToolCallContext.actor`
+automatically (`hubUserTokenAuth: 'auto'`, the default) whenever
+`standaloneIdentity` is set, or `runtimeDispatchV3.trust` is a static (non-resolver)
+trust record, and the app has not already supplied its own `auth` /
+`extractCallerCredential`. The verified token's `rid` is cross-bound against the
+already-verified dispatch assertion's room: a room-scoped assertion requires the
+token's `rid` to match exactly, and a workspace-scoped assertion refuses a
+room-bound token outright — `buildContext` throws `dispatch_assertion_binding_mismatch`
+on a mismatch, which `connectRelay` turns into a denied dispatch before the handler
+runs. Set `hubUserTokenAuth: 'disabled'` to opt out.
+
+```ts
+connectRelay({
+  privosUrl: loaded.relay.privosUrl,
+  standaloneIdentity,
+  descriptor,
+  handler, // context.actor is populated automatically when a token verifies
+});
+```
+
+For a non-standalone Relay/Direct setup with a dynamic (resolver) trust —
+where this app's own `mcpAppId` is still fixed, just not known synchronously
+from a static trust record — wire the same verification manually:
+
+```ts
+import {
+  buildHubUserTokenAuthOptions,
+  extractRelayUserTokenCredential,
+} from '@privos_ai/app-server';
+
+connectRelay({
+  privosUrl,
+  runtimeDispatchV3, // trust: a resolver function
+  auth: buildHubUserTokenAuthOptions({ hubOrigin: privosUrl, audience: mcpAppId }),
+  extractCallerCredential: extractRelayUserTokenCredential,
+  descriptor,
+  handler,
+});
+```
+
+`ToolCallContext.actor.provenance` distinguishes how an actor was established:
+`'dispatch-assertion'` for the managed-Cluster embedded `actor` claim (Direct
+transport only), `'user-token'` for this separately-verified Hub JWT (Direct
+bearer header or Relay `_meta.privosUser.userToken`). Apps that want a
+stricter policy for one path than the other can branch on this field.
+`buildHubUserTokenAuthOptions` refuses a plaintext-HTTP JWKS origin once
+`NODE_ENV=production`, bounds the JWKS fetch with a timeout, and — via the
+shared `jose` remote-JWKS client underneath — refetches at most once on an
+unknown `kid` before failing closed. A JWKS fetch failure never crashes
+dispatch; it degrades to `identityState: 'invalid'` and `actor: undefined`.
+
 Managed App Library generations use this same canonical Direct ingress. The
 router learns the generation from the verified workload broker, accepts only
 `X-PrivOS-Dispatch-Assertion`, verifies it with
@@ -297,6 +359,68 @@ receipt/epoch/version identity, with one fixed 64-entry process-local LRU/token
 and active-issuance bound. A 401 evicts only the exact key that supplied the
 attempted token. POST/PATCH replay requires both `retryMode: 'idempotent'` and
 `replayable: true`; safe methods retain one refresh retry.
+
+## Standalone production mode (Relay pairing)
+
+Self-hosted apps with no reachable public URL (typically behind NAT) pair once over
+a one-time Relay WebSocket URL and run in production against a paired, persisted
+identity — no secret ever lives in a world-readable `.env`.
+
+```ts
+import { pairOverWebSocket } from '@privos_ai/app-server';
+
+// Prints the Hub fingerprint (SSH-host-key style) and, by default, persists
+// ./privos-standalone-identity.json at mode 0600 (override with
+// PRIVOS_STANDALONE_IDENTITY_FILE).
+await pairOverWebSocket(pairingUrl, { name: 'My App', version: '1.0.0' });
+```
+
+A Hub that replies with pairing payload v2 (`pairingVersion: 2`) additionally
+delivers Hub dispatch trust (`hubKid`, `hubPublicJwk`, affinity) and a pinned
+manifest digest; a v1 Hub pairs exactly as before (nothing persisted). Load the
+identity and run the app with `resolveRuntimeMode()` picking the transport:
+
+```ts
+import {
+  connectRelay,
+  createStandaloneReadinessCheck,
+  createStandaloneRelayIdentityController,
+  loadStandaloneIdentity,
+  resolveRuntimeMode,
+} from '@privos_ai/app-server';
+
+const runtimeMode = resolveRuntimeMode(); // 'managed' | 'standalone-production' | 'development'
+
+if (runtimeMode.mode === 'standalone-production') {
+  const loaded = loadStandaloneIdentity();
+  const standaloneIdentity = createStandaloneRelayIdentityController(loaded);
+  const relay = connectRelay({ privosUrl: loaded.relay.privosUrl, standaloneIdentity, descriptor, handler });
+
+  const ready = createStandaloneReadinessCheck({
+    isRelayAuthenticated: () => relay.isConnected(),
+    resolveManifest: () => publisherManifest,
+  });
+}
+```
+
+`resolveRuntimeMode()` resolves exactly one mode — `managed` (workload identity
+socket present) takes precedence over `standalone-production` (identity file
+present), which takes precedence over `development` (neither present; only
+permitted when `NODE_ENV` is not `production`). Both signals present at once is a
+startup error (`RuntimeModeError` code `AMBIGUOUS_RUNTIME_IDENTITY`), never a
+silent pick; `NODE_ENV=production` with neither present is `PRODUCTION_WITHOUT_IDENTITY`.
+
+Secret rotation, Hub re-key/generation trust rotation, and a capabilities push are
+delivered as ES256-signed control notifications over the same authenticated Relay
+connection, verified against the currently pinned Hub key before being applied and
+atomically persisted (`src/relay/standalone-control.ts` documents the wire
+contract). A cold app that missed a rotation correctly refuses the new key until
+it is delivered live or the app is re-paired — this is expected, not a bug.
+`createStandaloneReadinessCheck` matches the managed `/health` (alive) + `/ready`
+(identity loaded, trust valid, Relay authenticated, manifest lint clean, and no
+`MANIFEST_DRIFT` against the digest pinned at pairing) JSON shape, and
+`loadStandaloneIdentity` refuses to load a tampered file (wrong mode, foreign
+owner, or invalid content) with a specific reason instead of degrading silently.
 
 ## Manifest v2 preflight
 

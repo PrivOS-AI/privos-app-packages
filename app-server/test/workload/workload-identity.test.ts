@@ -135,7 +135,7 @@ function fabricatedRoomContext(bindingId: string, roomId = 'room-1'): ToolCallCo
 		identityState: 'verified',
 		sessionScope: `session-${bindingId}`,
 		roomId,
-		actor: Object.freeze({ userId: 'user-1', roomId, claims: Object.freeze({ sub: 'user-1', rid: roomId }) }),
+		actor: Object.freeze({ userId: 'user-1', roomId, claims: Object.freeze({ sub: 'user-1', rid: roomId }), provenance: 'dispatch-assertion' }),
 		runtimeAuthorization: Object.freeze({
 			verificationPath: 'managed-cluster-v3',
 			protocolVersion: 3,

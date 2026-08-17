@@ -1,5 +1,17 @@
 import type { VerifiedRuntimeAuthorizationV3 } from '../workload/dispatch-assertion.js';
 
+/**
+ * How a `VerifiedActor` was established:
+ * - `'dispatch-assertion'` — a Hub-signed dispatch assertion carried an
+ *   embedded `actor` claim (managed Cluster ingress, Direct transport only).
+ * - `'user-token'` — a separate Hub-signed RS256 user JWT was verified
+ *   against the Hub JWKS (Direct bearer header, or Relay
+ *   `_meta.privosUser.userToken`).
+ * Apps that want stricter policy for one provenance than the other can branch
+ * on this field; `context.transport` narrows it further (e.g. relay + user-token).
+ */
+export type VerifiedActorProvenance = 'dispatch-assertion' | 'user-token';
+
 export interface VerifiedActor {
 	/** JWT `sub` — stable opaque user id. */
 	userId: string;
@@ -9,6 +21,8 @@ export interface VerifiedActor {
 	roomId?: string;
 	/** Raw claims subset safe for app policy (no token string). */
 	claims: Readonly<Record<string, unknown>>;
+	/** How this actor was established — see {@link VerifiedActorProvenance}. */
+	provenance: VerifiedActorProvenance;
 }
 
 export type IdentityState = 'verified' | 'missing' | 'invalid';

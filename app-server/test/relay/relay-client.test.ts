@@ -1,14 +1,20 @@
 import crypto from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { describe, expect, it, vi } from 'vitest';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { AppDescriptor } from '../../src/app-descriptor.js';
 import { connectRelay, pairOverWebSocket } from '../../src/relay/relay-client.js';
+import { createStandaloneRelayIdentityController, STANDALONE_SECRET_ROTATE_METHOD } from '../../src/relay/standalone-control.js';
+import { loadStandaloneIdentity, saveStandaloneIdentity, standaloneHubFingerprint, type StandaloneIdentityV2 } from '../../src/relay/standalone-identity.js';
 import { relayCallerAuthSurface } from '../../src/runtime.js';
 import {
 	BoundedRuntimeDispatchReplayConsumerV3,
 	sha256RuntimeDispatchBodyV3,
 	type RuntimeDispatchSecurityV3,
+	type RuntimeDispatchTrustV3,
 } from '../../src/workload/dispatch-assertion.js';
 
 const descriptor: AppDescriptor = {
@@ -639,5 +645,279 @@ describe('pairOverWebSocket', () => {
 				{ timeoutMs: 1000 },
 			),
 		).rejects.toThrow(/closed before credentials/i);
+	});
+});
+
+function trustFixture(overrides: Partial<RuntimeDispatchTrustV3['affinity']> = {}) {
+	const pair = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
+	const publicJwk = pair.publicKey.export({ format: 'jwk' }) as { crv: string; kty: string; x: string; y: string };
+	const hubPublicJwk = { crv: publicJwk.crv, kty: publicJwk.kty, x: publicJwk.x, y: publicJwk.y };
+	const hubKid = crypto.createHash('sha256').update(canonical(hubPublicJwk), 'utf8').digest('base64url');
+	const trust: RuntimeDispatchTrustV3 = {
+		hubKid,
+		hubPublicJwk,
+		affinity: {
+			workspaceId: 'workspace-1',
+			deploymentId: 'deployment-1',
+			mcpAppId: 'mcp-app-1',
+			executionMode: 'PUBLISHER_HOSTED',
+			generationId: 'generation-1',
+			generationNumber: 1,
+			runtimeInstallationId: 'installation-1',
+			manifestDigest: `sha256:${'a'.repeat(64)}`,
+			resourceManifestHash: 'B'.repeat(43),
+			runtimeResourceInventoryHash: 'C'.repeat(43),
+			runtimeApprovalReceiptHash: 'D'.repeat(43),
+			runtimeAuthorizationEpoch: 1,
+			...overrides,
+		},
+	};
+	return { privateKey: pair.privateKey, trust };
+}
+
+function signControlAssertion(input: {
+	privateKey: crypto.KeyObject;
+	kid: string;
+	type: string;
+	deploymentId: string;
+	mcpAppId: string;
+	data: unknown;
+	now: number;
+}): string {
+	const header = { alg: 'ES256', kid: input.kid, privos_protocol: 3, typ: 'privos-hub-standalone-control+jws' };
+	const payload = {
+		protocolVersion: 3,
+		type: input.type,
+		iss: `hub:${input.deploymentId}`,
+		aud: `mcp-runtime:${input.mcpAppId}`,
+		jti: crypto.randomUUID(),
+		nonce: crypto.randomBytes(24).toString('base64url'),
+		iat: input.now,
+		exp: input.now + 30,
+		data: input.data,
+	};
+	const encodedHeader = Buffer.from(canonical(header)).toString('base64url');
+	const encodedPayload = Buffer.from(canonical(payload)).toString('base64url');
+	const signature = crypto
+		.sign('sha256', Buffer.from(`${encodedHeader}.${encodedPayload}`, 'ascii'), { key: input.privateKey, dsaEncoding: 'ieee-p1363' })
+		.toString('base64url');
+	return `${encodedHeader}.${encodedPayload}.${signature}`;
+}
+
+describe('pairOverWebSocket v2 (standalone identity)', () => {
+	let tempDirectory: string;
+	let filePath: string;
+
+	beforeEach(async () => {
+		tempDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'pairing-v2-'));
+		filePath = path.join(tempDirectory, 'identity.json');
+	});
+
+	afterEach(async () => {
+		await fs.rm(tempDirectory, { recursive: true, force: true });
+	});
+
+	class PairingV2Ws extends EventEmitter {
+		constructor(
+			_url: string,
+			private readonly result: Record<string, unknown>,
+		) {
+			super();
+			queueMicrotask(() => this.emit('open'));
+		}
+		send() {
+			queueMicrotask(() => this.emit('message', Buffer.from(JSON.stringify({ result: this.result }))));
+		}
+		close() {}
+	}
+
+	it('captures trust, persists a standalone identity file at 0600, and prints the fingerprint', async () => {
+		const { trust } = trustFixture();
+		const fingerprint = standaloneHubFingerprint(trust.hubKid);
+		const Ws = class extends PairingV2Ws {
+			constructor(url: string) {
+				super(url, {
+					paired: true,
+					clientId: 'client-1',
+					clientSecret: 'secret-1',
+					relayUrl: 'ws://hub.example/api/v1/mcp-apps.relay',
+					mcpAppId: 'mcp-app-1',
+					pairingVersion: 2,
+					trust,
+					fingerprint,
+				});
+			}
+		};
+		const fingerprintLines: string[] = [];
+		const result = await pairOverWebSocket('ws://hub/pair', { name: 'Demo' }, Ws as unknown as typeof import('ws').default, {
+			identityFilePath: filePath,
+			onFingerprint: (line) => fingerprintLines.push(line),
+		});
+
+		expect(result.pairingVersion).toBe(2);
+		expect(result.trust).toEqual(trust);
+		expect(result.fingerprint).toBe(fingerprint);
+		expect(result.identityFilePath).toBe(filePath);
+		expect(fingerprintLines).toHaveLength(1);
+		expect(fingerprintLines[0]).toContain(fingerprint);
+
+		const loaded = loadStandaloneIdentity({ filePath });
+		expect(loaded.relay).toEqual({ privosUrl: 'http://hub.example', clientId: 'client-1', clientSecret: 'secret-1' });
+		const stat = await fs.stat(filePath);
+		expect((stat.mode & 0o777).toString(8)).toBe('600');
+	});
+
+	it('a v1 Hub response (no pairingVersion) still pairs as before — additive only, nothing persisted', async () => {
+		const Ws = class extends PairingV2Ws {
+			constructor(url: string) {
+				super(url, {
+					paired: true,
+					clientId: 'client-1',
+					clientSecret: 'secret-1',
+					relayUrl: 'ws://hub.example/api/v1/mcp-apps.relay',
+				});
+			}
+		};
+		const result = await pairOverWebSocket('ws://hub/pair', { name: 'Demo' }, Ws as unknown as typeof import('ws').default, {
+			identityFilePath: filePath,
+		});
+		expect(result).toEqual({
+			privosUrl: 'http://hub.example',
+			clientId: 'client-1',
+			clientSecret: 'secret-1',
+			mcpAppId: undefined,
+		});
+		expect(result.pairingVersion).toBeUndefined();
+		await expect(fs.stat(filePath)).rejects.toThrow();
+	});
+
+	it('rejects a v2 response whose trust is malformed instead of silently degrading to v1', async () => {
+		const Ws = class extends PairingV2Ws {
+			constructor(url: string) {
+				super(url, {
+					paired: true,
+					clientId: 'client-1',
+					clientSecret: 'secret-1',
+					relayUrl: 'ws://hub.example/api/v1/mcp-apps.relay',
+					pairingVersion: 2,
+					trust: { hubKid: 'not-a-real-trust-object' },
+				});
+			}
+		};
+		await expect(
+			pairOverWebSocket('ws://hub/pair', { name: 'Demo' }, Ws as unknown as typeof import('ws').default, {
+				identityFilePath: filePath,
+			}),
+		).rejects.toThrow();
+		await expect(fs.stat(filePath)).rejects.toThrow();
+	});
+});
+
+describe('connectRelay with standaloneIdentity', () => {
+	let tempDirectory: string;
+	let filePath: string;
+
+	beforeEach(async () => {
+		tempDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'connect-relay-standalone-'));
+		filePath = path.join(tempDirectory, 'identity.json');
+	});
+
+	afterEach(async () => {
+		await fs.rm(tempDirectory, { recursive: true, force: true });
+	});
+
+	async function seedIdentity(trust: RuntimeDispatchTrustV3) {
+		const identity: StandaloneIdentityV2 = {
+			pairingVersion: 2,
+			relayUrl: 'https://hub.example',
+			clientId: 'client-1',
+			clientSecret: 'secret-1',
+			trust,
+			fingerprint: standaloneHubFingerprint(trust.hubKid),
+			mcpAppId: trust.affinity.mcpAppId,
+			pairedAt: Date.now(),
+		};
+		await saveStandaloneIdentity(identity, { filePath });
+		return loadStandaloneIdentity({ filePath });
+	}
+
+	it('sources OAuth credentials from the controller and reports isConnected() through the connection lifecycle', async () => {
+		const { trust } = trustFixture();
+		const loaded = await seedIdentity(trust);
+		const controller = createStandaloneRelayIdentityController(loaded);
+
+		FakeWebSocket.instances = [];
+		const seenBodies: string[] = [];
+		const fetchImpl = vi.fn(async (_url: string, init: { body: string }) => {
+			seenBodies.push(init.body);
+			return { ok: true, json: async () => ({ access_token: 'tok' }) };
+		});
+		const handle = connectRelay({
+			privosUrl: 'https://hub.example',
+			standaloneIdentity: controller,
+			descriptor,
+			handler: async () => ({ ok: true }),
+			fetchImpl: fetchImpl as unknown as typeof fetch,
+			WebSocketImpl: FakeWebSocket as unknown as typeof import('ws').default,
+		});
+
+		expect(handle.isConnected()).toBe(false);
+		await handle.whenConnected();
+		expect(handle.isConnected()).toBe(true);
+		expect(seenBodies[0]).toContain('client_id=client-1');
+		expect(seenBodies[0]).toContain('client_secret=secret-1');
+
+		await handle.stop();
+		expect(handle.isConnected()).toBe(false);
+	});
+
+	it('routes a signed standalone control notification to the controller instead of MCP dispatch', async () => {
+		const { privateKey, trust } = trustFixture();
+		const loaded = await seedIdentity(trust);
+		const now = 2_000_000_000;
+		const controller = createStandaloneRelayIdentityController(loaded, { now: () => now });
+
+		FakeWebSocket.instances = [];
+		const handler = vi.fn(async () => ({ ok: true }));
+		const fetchImpl = vi.fn(async () => ({ ok: true, json: async () => ({ access_token: 'tok' }) }));
+		const handle = connectRelay({
+			privosUrl: 'https://hub.example',
+			standaloneIdentity: controller,
+			descriptor,
+			handler,
+			fetchImpl: fetchImpl as unknown as typeof fetch,
+			WebSocketImpl: FakeWebSocket as unknown as typeof import('ws').default,
+		});
+		await handle.whenConnected();
+		const ws = FakeWebSocket.instances[0]!;
+
+		const assertion = signControlAssertion({
+			privateKey,
+			kid: trust.hubKid,
+			type: 'standalone-secret-rotate',
+			deploymentId: trust.affinity.deploymentId,
+			mcpAppId: trust.affinity.mcpAppId,
+			data: { clientId: 'client-2', clientSecret: 'secret-2' },
+			now,
+		});
+		ws.emit(
+			'message',
+			Buffer.from(JSON.stringify({ jsonrpc: '2.0', method: STANDALONE_SECRET_ROTATE_METHOD, params: { assertion } })),
+		);
+
+		await vi.waitFor(() => expect(controller.getCredentials().clientId).toBe('client-2'));
+		expect(handler).not.toHaveBeenCalled();
+		expect(ws.sent).toHaveLength(0);
+		await handle.stop();
+	});
+
+	it('requires either clientId+clientSecret or a standaloneIdentity controller', () => {
+		expect(() =>
+			connectRelay({
+				privosUrl: 'https://hub.example',
+				descriptor,
+				handler: async () => ({ ok: true }),
+			}),
+		).toThrow(/clientId and clientSecret, or a standaloneIdentity controller/);
 	});
 });

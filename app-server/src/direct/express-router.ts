@@ -375,6 +375,7 @@ function withManagedDispatchActor(
 		...(actor.username !== undefined ? { username: actor.username } : {}),
 		...(actor.roomId !== undefined ? { roomId: actor.roomId } : {}),
 		claims,
+		provenance: 'dispatch-assertion',
 	});
 	return {
 		...context,

@@ -13,6 +13,7 @@ import type { VerifiedRuntimeDispatchAssertionV3 } from '../../src/workload/disp
 const actor: VerifiedActor = {
 	userId: 'u1',
 	claims: { sub: 'u1' },
+	provenance: 'user-token',
 };
 
 function ctx(partial: Partial<ToolCallContext>): ToolCallContext {

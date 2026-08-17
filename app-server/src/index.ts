@@ -16,6 +16,7 @@ export {
 
 export type {
 	VerifiedActor,
+	VerifiedActorProvenance,
 	IdentityState,
 	ToolCallContext,
 } from './context/tool-call-context.js';
@@ -110,10 +111,65 @@ export {
 export type {
 	PairAppMeta,
 	PairingResult,
+	PairOverWebSocketOptions,
 	RelayClientOptions,
 	RelayHandle,
 } from './relay/relay-client.js';
 export { rawDataToText, MessageTooLargeError } from './relay/message-adapter.js';
+export {
+	DEFAULT_HUB_USER_TOKEN_JWKS_PATH,
+	buildHubUserTokenAuthOptions,
+	extractRelayUserTokenCredential,
+	validateHubUserTokenOrigin,
+} from './relay/hub-user-token-actor.js';
+export type { HubUserTokenAuthOptions } from './relay/hub-user-token-actor.js';
+
+export {
+	DEFAULT_STANDALONE_IDENTITY_FILE,
+	StandaloneIdentityError,
+	loadStandaloneIdentity,
+	saveStandaloneIdentity,
+	rotateStandaloneIdentity,
+	standaloneIdentityFileExists,
+	standaloneHubFingerprint,
+	assertStandaloneIdentityShape,
+} from './relay/standalone-identity.js';
+export type {
+	StandaloneIdentityV2,
+	LoadedStandaloneIdentity,
+	StandaloneIdentityErrorCode,
+} from './relay/standalone-identity.js';
+export {
+	STANDALONE_SECRET_ROTATE_METHOD,
+	STANDALONE_TRUST_ROTATE_METHOD,
+	STANDALONE_CAPABILITIES_CHANGED_METHOD,
+	StandaloneControlError,
+	isStandaloneControlMethod,
+	createStandaloneRelayIdentityController,
+	loadStandaloneRelayIdentityController,
+} from './relay/standalone-control.js';
+export type {
+	StandaloneEffectiveCapabilities,
+	StandaloneRelayIdentityController,
+	StandaloneRelayIdentityControllerOptions,
+} from './relay/standalone-control.js';
+export {
+	checkManifestDigestDrift,
+	createStandaloneReadinessCheck,
+} from './relay/standalone-readiness.js';
+export type {
+	StandaloneReadinessCheckOptions,
+	StandaloneReadinessReason,
+	StandaloneReadinessResult,
+} from './relay/standalone-readiness.js';
+
+export { resolveRuntimeMode, RuntimeModeError } from './runtime-mode.js';
+export type {
+	RuntimeMode,
+	RuntimeModeResolution,
+	RuntimeModeErrorCode,
+	ResolveRuntimeModeOptions,
+} from './runtime-mode.js';
 
 export {
 	DEFAULT_WORKLOAD_SOCKET,

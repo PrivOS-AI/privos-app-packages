@@ -1,6 +1,20 @@
 /**
  * MCP app server — serves manifest, handles MCP JSON-RPC calls, and serves UI.
  *
+ * RUNTIME MODE
+ * ------------
+ * `resolveRuntimeMode()` picks exactly one of three ways this app talks to
+ * its Hub, in this precedence: `managed` (workload identity socket present —
+ * cluster-routed), `standalone-production` (a paired standalone identity file
+ * is present — Relay transport, mandatory signed dispatch), `development`
+ * (neither present; only allowed when `NODE_ENV` is not `production`). Both
+ * signals present at once is a startup error, never a silent pick. Pair this
+ * app first with `pairOverWebSocket` to produce the standalone identity file.
+ *
+ * `standalone-production` bypasses the Direct HTTP block below entirely and
+ * talks to the Hub only over the already-authenticated Relay WebSocket; see
+ * `startStandaloneProductionRelay()`.
+ *
  * USER IDENTITY
  * -------------
  * The hub delivers a signed RS256 JWT (`userToken`) to the app iframe on every
@@ -17,17 +31,26 @@ import { readFileSync } from 'fs';
 import path from 'path';
 import {
 	BoundedRuntimeDispatchReplayConsumerV3,
+	connectRelay,
 	createPinnedPortalJwksResolverV3,
 	createPublisherRuntimeTrustProvisioningRouterV3,
 	createDirectRouter,
+	createStandaloneReadinessCheck,
+	createStandaloneRelayIdentityController,
+	loadStandaloneIdentity,
 	parseRuntimeDispatchTrustV3Json,
+	resolveRuntimeMode,
+	RuntimeModeError,
 	SingleProcessFilePublisherRuntimeTrustStoreV3,
+	standaloneIdentityFileExists,
 	verifyPrivosUser,
 	type AppDescriptor,
 	type ApplicationMcpRequest,
 	type AuthOptions,
 	type DirectRouterOptions,
+	type RuntimeModeResolution,
 	type ToolCallContext,
+	type UiResourceProvider,
 	type VerifiedActor,
 } from '@privos_ai/app-server';
 
@@ -80,6 +103,16 @@ function publisherTrustBootstrap() {
 
 const publisherTrust = publisherTrustBootstrap();
 
+/**
+ * Direct-HTTP-only security selection (`managed-v2` via the workload broker,
+ * or `runtime-v3` publisher-hosted dispatch). Independent of
+ * `resolveRuntimeMode()` — a publicly reachable publisher-hosted app may run
+ * `runtime-v3` over Direct HTTP with no workload socket and no paired
+ * standalone identity file at all. When a standalone identity file IS present
+ * (this app was paired), its trust supersedes the raw
+ * `PRIVOS_RUNTIME_DISPATCH_TRUST_V3` env var for `runtime-v3`; the env var
+ * still works when there is no paired file.
+ */
 function runtimeBoundaryOptions(): Pick<
 	DirectRouterOptions,
 	'workloadSecurity' | 'runtimeDispatchV3'
@@ -107,15 +140,22 @@ function runtimeBoundaryOptions(): Pick<
 			},
 		};
 	}
-	const rawTrust = process.env.PRIVOS_RUNTIME_DISPATCH_TRUST_V3;
-	if (!rawTrust) {
-		throw new Error('PRIVOS_RUNTIME_DISPATCH_TRUST_V3 is required for runtime-v3.');
-	}
 	const readiness = process.env.PRIVOS_RUNTIME_ALLOW_UNSIGNED_PREACTIVATION_READINESS;
 	if (readiness !== undefined && readiness !== 'true' && readiness !== 'false') {
 		throw new Error('PRIVOS_RUNTIME_ALLOW_UNSIGNED_PREACTIVATION_READINESS must be true or false.');
 	}
-	const trust = parseRuntimeDispatchTrustV3Json(rawTrust);
+	const trust = standaloneIdentityFileExists()
+		? loadStandaloneIdentity().trust
+		: (() => {
+				const rawTrust = process.env.PRIVOS_RUNTIME_DISPATCH_TRUST_V3;
+				if (!rawTrust) {
+					throw new Error(
+						'runtime-v3 requires either a paired standalone identity file (pairOverWebSocket) '
+						+ 'or PRIVOS_RUNTIME_DISPATCH_TRUST_V3.',
+					);
+				}
+				return parseRuntimeDispatchTrustV3Json(rawTrust);
+			})();
 	return {
 		runtimeDispatchV3: {
 			mode: 'required',
@@ -130,8 +170,6 @@ function runtimeBoundaryOptions(): Pick<
 		},
 	};
 }
-
-const runtimeBoundary = runtimeBoundaryOptions();
 
 const authOptions: AuthOptions = {
 	jwksUrl: `${PRIVOS_HUB_URL}/.well-known/mcp-apps/jwks.json`,
@@ -193,61 +231,159 @@ async function mcpHandler(request: ApplicationMcpRequest, _ctx: ToolCallContext)
 	throw Object.assign(new Error(`Method not found: ${request.method}`), { code: -32601 });
 }
 
-const app = express();
-if (publisherTrust) {
-	app.use(createPublisherRuntimeTrustProvisioningRouterV3({
-		provisioningUrl: publisherTrust.provisioningUrl,
-		mcpAppId: APP_ID,
-		portalJwksResolver: publisherTrust.portalJwksResolver,
-		store: publisherTrust.store,
-	}));
-}
-app.use(express.json());
-app.use(express.static(path.resolve(process.cwd(), 'dist')));
-
-// The runtime exposes the exact reviewed Publisher manifest.
-app.get('/.well-known/mcp/manifest.json', (_req, res) => {
-	res.json(publisherManifest);
-});
-
-app.use(
-	createDirectRouter({
-		descriptor,
-		handler: mcpHandler,
-		auth: authOptions,
-		...runtimeBoundary,
-		ui: {
-			uri: 'ui://{{APP_NAME}}/dashboard.html',
-			renderHtml: async () => process.env.NODE_ENV === 'production'
-				? readFileSync(path.resolve(process.cwd(), 'dist/index.html'), 'utf8')
-				: `<!DOCTYPE html>
+const dashboardUi: UiResourceProvider = {
+	uri: 'ui://{{APP_NAME}}/dashboard.html',
+	renderHtml: async () => process.env.NODE_ENV === 'production'
+		? readFileSync(path.resolve(process.cwd(), 'dist/index.html'), 'utf8')
+		: `<!DOCTYPE html>
 <html><head><title>{{APP_NAME}}</title><style>html,body{margin:0}</style></head>
 <body><div id="root"></div>
 <script type="module" src="http://localhost:5173/src/ui/main.tsx"></script>
 </body></html>`,
-		},
-	}),
-);
+};
 
-app.get('/api/me', requirePrivosUser, (req, res) => {
-	res.json({ user: req.privosUser });
-});
+/**
+ * `managed` / `development` — Direct HTTP transport, unchanged from prior
+ * template versions. `runtime-v3` (see `runtimeBoundaryOptions`) can also run
+ * here for a publicly reachable publisher-hosted app.
+ */
+function startDirectHttp(): void {
+	const runtimeBoundary = runtimeBoundaryOptions();
+	const app = express();
+	if (publisherTrust) {
+		app.use(createPublisherRuntimeTrustProvisioningRouterV3({
+			provisioningUrl: publisherTrust.provisioningUrl,
+			mcpAppId: APP_ID,
+			portalJwksResolver: publisherTrust.portalJwksResolver,
+			store: publisherTrust.store,
+		}));
+	}
+	app.use(express.json());
+	app.use(express.static(path.resolve(process.cwd(), 'dist')));
 
-const PORT = Number(process.env.PORT || publisherManifest.port || 3001);
-const server = app.listen(PORT, () => {
-	console.log(`MCP app listening on http://localhost:${PORT}`);
-});
-
-function shutdown(signal: string): void {
-	console.log(`Received ${signal}; shutting down`);
-	server.close(async (error) => {
-		await publisherTrust?.store.close();
-		if (error) {
-			console.error('Failed to close MCP app server', error);
-			process.exitCode = 1;
-		}
+	// The runtime exposes the exact reviewed Publisher manifest.
+	app.get('/.well-known/mcp/manifest.json', (_req, res) => {
+		res.json(publisherManifest);
 	});
+
+	app.use(
+		createDirectRouter({
+			descriptor,
+			handler: mcpHandler,
+			auth: authOptions,
+			...runtimeBoundary,
+			ui: dashboardUi,
+		}),
+	);
+
+	app.get('/api/me', requirePrivosUser, (req, res) => {
+		res.json({ user: req.privosUser });
+	});
+
+	const PORT = Number(process.env.PORT || publisherManifest.port || 3001);
+	const server = app.listen(PORT, () => {
+		console.log(`MCP app listening on http://localhost:${PORT}`);
+	});
+
+	function shutdown(signal: string): void {
+		console.log(`Received ${signal}; shutting down`);
+		server.close(async (error) => {
+			await publisherTrust?.store.close();
+			if (error) {
+				console.error('Failed to close MCP app server', error);
+				process.exitCode = 1;
+			}
+		});
+	}
+
+	process.once('SIGTERM', () => shutdown('SIGTERM'));
+	process.once('SIGINT', () => shutdown('SIGINT'));
 }
 
-process.once('SIGTERM', () => shutdown('SIGTERM'));
-process.once('SIGINT', () => shutdown('SIGINT'));
+/**
+ * `standalone-production` — this app was paired with `pairOverWebSocket`
+ * (see `PRIVOS_STANDALONE_IDENTITY_FILE`). MCP dispatch rides the Relay
+ * WebSocket only, with mandatory signed-assertion verification and automatic
+ * secret/trust rotation and capabilities push — never a Direct HTTP MCP
+ * surface. `/health` and `/ready` match the managed workload's JSON shape.
+ */
+function startStandaloneProductionRelay(): void {
+	const loaded = loadStandaloneIdentity();
+	const identityController = createStandaloneRelayIdentityController(loaded, {
+		logger: (event, fields) => console.log(`[standalone] ${event}`, fields),
+	});
+
+	const relayHandle = connectRelay({
+		privosUrl: loaded.relay.privosUrl,
+		standaloneIdentity: identityController,
+		descriptor,
+		handler: mcpHandler,
+		ui: dashboardUi,
+		logger: (event, fields) => {
+			if (event.includes('error') || event.includes('fail') || event.includes('rejected')) {
+				console.error(`[relay] ✗ ${event}`, fields);
+			} else {
+				console.log(`[relay] · ${event}`);
+			}
+		},
+	});
+
+	const readinessCheck = createStandaloneReadinessCheck({
+		isRelayAuthenticated: () => relayHandle.isConnected(),
+		resolveManifest: () => publisherManifest,
+	});
+
+	const readinessApp = express();
+	readinessApp.get('/health', (_req, res) => {
+		res.status(200).json({ ok: true, status: 'alive' });
+	});
+	readinessApp.get('/ready', async (_req, res) => {
+		const result = await readinessCheck();
+		res.status(result.status).json(result.body);
+	});
+	readinessApp.get('/.well-known/mcp/manifest.json', (_req, res) => {
+		res.json(publisherManifest);
+	});
+
+	const PORT = Number(process.env.PORT || publisherManifest.port || 3001);
+	const server = readinessApp.listen(PORT, () => {
+		console.log(`Standalone-production MCP app connected over Relay to ${loaded.relay.privosUrl}`);
+		console.log(`  Health: http://localhost:${PORT}/health`);
+		console.log(`  Ready:  http://localhost:${PORT}/ready`);
+	});
+
+	function shutdown(signal: string): void {
+		console.log(`Received ${signal}; shutting down`);
+		void relayHandle.stop().finally(() => {
+			server.close((error) => {
+				if (error) {
+					console.error('Failed to close MCP app server', error);
+					process.exitCode = 1;
+				}
+			});
+		});
+	}
+
+	process.once('SIGTERM', () => shutdown('SIGTERM'));
+	process.once('SIGINT', () => shutdown('SIGINT'));
+}
+
+let runtimeMode: RuntimeModeResolution | undefined;
+try {
+	runtimeMode = resolveRuntimeMode();
+} catch (error) {
+	if (error instanceof RuntimeModeError && error.code === 'AMBIGUOUS_RUNTIME_IDENTITY') {
+		// Both a workload socket and a paired identity file present — never guess.
+		console.error(error.message);
+		process.exit(1);
+	}
+	// PRODUCTION_WITHOUT_IDENTITY: neither pairing-based mode applies. The
+	// Direct HTTP path below (managed-v2 / runtime-v3 / dev) has its own,
+	// independent production gate in `runtimeBoundaryOptions`.
+}
+
+if (runtimeMode?.mode === 'standalone-production') {
+	startStandaloneProductionRelay();
+} else {
+	startDirectHttp();
+}
