@@ -386,6 +386,15 @@ if (pairing.state === 'pending-approval') {
 }
 ```
 
+If the initial socket closes after the Hub durably registers the app but before
+the result reaches this process, call `pairOverWebSocket` again explicitly with
+the **same pairing URL and exact published manifest**. A compatible Hub recovers
+the already-persisted app, pairing, OAuth client, client secret, manifest,
+permission contract, declared ceiling, and Hub-key identity for up to 24 hours;
+it never creates or rotates another credential. The SDK deliberately does not
+retry or poll on its own. A changed URL, manifest, app identity, creator,
+permission contract, OAuth binding, ceiling, or Hub key fails closed.
+
 A Hub that replies with pairing payload v2 (`pairingVersion: 2`) uses a
 discriminated `pending-approval` / `complete` contract. Pending state persists
 the exact app id, OAuth client, pairing id, manifest digest, permission-contract

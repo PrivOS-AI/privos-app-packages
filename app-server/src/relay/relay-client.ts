@@ -356,6 +356,13 @@ export interface RelayHandle {
  * create — same discipline as the Hub's own identity file), then prints the
  * Hub fingerprint for out-of-band operator verification. Set
  * `persistIdentityFile: false` to opt out and handle persistence yourself.
+ *
+ * If the socket closes after the Hub has persisted registration but before
+ * this function receives the result, the caller may explicitly invoke this
+ * function again with the same pairing URL and byte-semantically identical
+ * published manifest during the Hub's bounded recovery window. There is no
+ * automatic retry or polling loop: a changed URL, manifest, or authority must
+ * fail at the Hub rather than being hidden by client-side retry behavior.
  */
 export function pairOverWebSocket(
 	pairUrl: string,

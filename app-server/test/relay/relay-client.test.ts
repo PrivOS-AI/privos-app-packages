@@ -901,6 +901,103 @@ describe('pairOverWebSocket v2 (standalone identity)', () => {
 		await expect(fs.stat(pendingPath)).rejects.toThrow();
 	});
 
+	it('recovers the same pending identity by explicitly replaying the same URL and exact manifest after response loss', async () => {
+		const manifest = {
+			schemaVersion: 3,
+			kind: 'mcp-app',
+			name: 'com.example.response-loss',
+			version: '1.0.0',
+			title: 'Response Loss App',
+			description: 'Pairing recovery fixture.',
+			author: { name: 'Fixture Publisher' },
+			permissions: [
+				{
+					scope: 'basic:information',
+					requirement: 'required',
+					context: 'workspace',
+					executionContext: 'both',
+					feature: 'response-loss.core',
+					reason: 'Identify the installation.',
+				},
+			],
+			resourceManifestTemplate: [],
+		};
+		const manifestDigest = sha256CanonicalJson(manifest);
+		const hubKid = trustFixture().trust.hubKid;
+		const durableResult = {
+			paired: false,
+			pairingState: 'pending-approval',
+			clientId: 'client-response-loss',
+			clientSecret: 'secret-response-loss',
+			relayUrl: 'ws://hub.example/api/v1/mcp-apps.relay',
+			appId: 'mcp-app-response-loss',
+			pairingVersion: 2,
+			pairingId: 'pairing-response-loss',
+			oauthClientId: 'client-response-loss',
+			manifestDigest,
+			permissionContractHash: 'R'.repeat(43),
+			declaredPermissionCeiling: ['basic:information'],
+			hubKid,
+			fingerprint: standaloneHubFingerprint(hubKid),
+		};
+		const sent: string[] = [];
+		const urls: string[] = [];
+		class LossyWs extends EventEmitter {
+			constructor(url: string) {
+				super();
+				urls.push(url);
+				queueMicrotask(() => this.emit('open'));
+			}
+			send(payload: string) {
+				sent.push(payload);
+				queueMicrotask(() => this.emit('close', 1006, Buffer.from('response lost')));
+			}
+			close() {}
+		}
+		class RecoveryWs extends EventEmitter {
+			constructor(url: string) {
+				super();
+				urls.push(url);
+				queueMicrotask(() => this.emit('open'));
+			}
+			send(payload: string) {
+				sent.push(payload);
+				queueMicrotask(() => this.emit('message', Buffer.from(JSON.stringify({ result: durableResult }))));
+			}
+			close() {}
+		}
+
+		await expect(
+			pairOverWebSocket(
+				'ws://hub/pair?pair=one-time-token',
+				{ name: 'Response Loss', manifest },
+				LossyWs as unknown as typeof import('ws').default,
+				{ timeoutMs: 1000, persistIdentityFile: false },
+			),
+		).rejects.toThrow(/Pairing closed/i);
+		const recovered = await pairOverWebSocket(
+			'ws://hub/pair?pair=one-time-token',
+			{ name: 'Response Loss', manifest },
+			RecoveryWs as unknown as typeof import('ws').default,
+			{ timeoutMs: 1000, persistIdentityFile: false, onFingerprint: () => undefined },
+		);
+
+		expect(urls).toEqual(['ws://hub/pair?pair=one-time-token', 'ws://hub/pair?pair=one-time-token']);
+		expect(JSON.parse(sent[0]!).manifest).toEqual(manifest);
+		expect(JSON.parse(sent[1]!).manifest).toEqual(manifest);
+		expect(recovered).toMatchObject({
+			state: 'pending-approval',
+			mcpAppId: durableResult.appId,
+			pairingId: durableResult.pairingId,
+			oauthClientId: durableResult.oauthClientId,
+			clientSecret: durableResult.clientSecret,
+			manifestDigest,
+		});
+
+		const packageJson = JSON.parse(await fs.readFile(new URL('../../package.json', import.meta.url), 'utf8'));
+		expect(packageJson.version).toBe('0.7.1');
+	});
+
 	it('rejects a v2 response whose trust is malformed instead of silently degrading to v1', async () => {
 		const Ws = class extends PairingV2Ws {
 			constructor(url: string) {
