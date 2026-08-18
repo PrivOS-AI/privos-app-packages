@@ -678,7 +678,7 @@ describe('pairOverWebSocket', () => {
 			{ timeoutMs: 1000 },
 		);
 
-		expect(JSON.parse(sent[0]).manifest).toEqual(manifest);
+		expect(JSON.parse(sent[0]!).manifest).toEqual(manifest);
 		// Registered, not installed: credentials are real, the grant is not yet.
 		expect(result.awaitingApproval).toBe(true);
 		expect(result.trust).toBeUndefined();
@@ -715,7 +715,7 @@ describe('pairOverWebSocket', () => {
 			{ timeoutMs: 1000 },
 		);
 
-		expect('manifest' in JSON.parse(sent[0])).toBe(false);
+		expect('manifest' in JSON.parse(sent[0]!)).toBe(false);
 		expect(result.awaitingApproval).toBeUndefined();
 	});
 });
