@@ -646,6 +646,78 @@ describe('pairOverWebSocket', () => {
 			),
 		).rejects.toThrow(/closed before credentials/i);
 	});
+
+	it('announces the app manifest so no admin ever handles the file', async () => {
+		const sent: string[] = [];
+		class PairingWs extends EventEmitter {
+			constructor(_url: string) {
+				super();
+				queueMicrotask(() => this.emit('open'));
+			}
+			send(payload: string) {
+				sent.push(payload);
+				queueMicrotask(() =>
+					this.emit(
+						'message',
+						Buffer.from(
+							JSON.stringify({
+								result: { paired: true, clientId: 'client', clientSecret: 'secret', relayUrl: 'ws://hub/api/v1/mcp-apps.relay', appId: 'app-1', awaitingApproval: true },
+							}),
+						),
+					),
+				);
+			}
+			close() {}
+		}
+
+		const manifest = { id: 'ai.privos.demo', schemaVersion: 3 };
+		const result = await pairOverWebSocket(
+			'ws://hub/pair',
+			{ name: 'Demo', manifest },
+			PairingWs as unknown as typeof import('ws').default,
+			{ timeoutMs: 1000 },
+		);
+
+		expect(JSON.parse(sent[0]).manifest).toEqual(manifest);
+		// Registered, not installed: credentials are real, the grant is not yet.
+		expect(result.awaitingApproval).toBe(true);
+		expect(result.trust).toBeUndefined();
+		expect(result.identityFilePath).toBeUndefined();
+	});
+
+	it('omits the manifest field entirely when the app announces none', async () => {
+		const sent: string[] = [];
+		class PairingWs extends EventEmitter {
+			constructor(_url: string) {
+				super();
+				queueMicrotask(() => this.emit('open'));
+			}
+			send(payload: string) {
+				sent.push(payload);
+				queueMicrotask(() =>
+					this.emit(
+						'message',
+						Buffer.from(
+							JSON.stringify({
+								result: { paired: true, clientId: 'client', clientSecret: 'secret', relayUrl: 'ws://hub/api/v1/mcp-apps.relay', appId: 'app-1' },
+							}),
+						),
+					),
+				);
+			}
+			close() {}
+		}
+
+		const result = await pairOverWebSocket(
+			'ws://hub/pair',
+			{ name: 'Demo' },
+			PairingWs as unknown as typeof import('ws').default,
+			{ timeoutMs: 1000 },
+		);
+
+		expect('manifest' in JSON.parse(sent[0])).toBe(false);
+		expect(result.awaitingApproval).toBeUndefined();
+	});
 });
 
 function trustFixture(overrides: Partial<RuntimeDispatchTrustV3['affinity']> = {}) {

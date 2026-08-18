@@ -55,6 +55,14 @@ export interface PairAppMeta {
 	icon?: string;
 	scopes?: string[];
 	permissions?: AppPermissionDescriptor[];
+	/**
+	 * The app's own `privos-app.json`, announced at pairing so no admin ever
+	 * handles the file. A Hub that accepts it registers a v3 app carrying this
+	 * contract, declared but unapproved: the app holds credentials and no grant
+	 * until an admin approves a ceiling, and no dispatch trust until it pairs
+	 * again against the approved app. Omit it to register a legacy relay app.
+	 */
+	manifest?: unknown;
 }
 
 export interface PairingResult {
@@ -69,6 +77,13 @@ export interface PairingResult {
 	fingerprint?: string;
 	/** Absolute path the standalone identity file was written to, when persisted. */
 	identityFilePath?: string;
+	/**
+	 * The Hub registered this app from its announced manifest and is waiting for
+	 * an admin to approve a permission ceiling. The credentials above are real,
+	 * but the app is granted nothing and carries no dispatch trust yet — pair
+	 * again once approved to receive it.
+	 */
+	awaitingApproval?: boolean;
 }
 
 export interface PairOverWebSocketOptions {
@@ -205,14 +220,18 @@ export function pairOverWebSocket(
 			pairingVersion?: number;
 			trust?: unknown;
 			fingerprint?: string;
+			awaitingApproval?: boolean;
 		}): Promise<PairingResult> {
 			if (input.pairingVersion !== 2) {
-				// v1 Hub — additive-only, unchanged behavior: no trust, no persistence.
+				// Either a v1 Hub, or a manifest-announced registration still awaiting
+				// approval: both hand back credentials and nothing to persist, because
+				// trust is minted with the generation an approved ceiling creates.
 				return {
 					privosUrl: input.privosUrl,
 					clientId: input.clientId,
 					clientSecret: input.clientSecret,
 					mcpAppId: input.mcpAppId,
+					...(input.awaitingApproval ? { awaitingApproval: true } : {}),
 				};
 			}
 			assertRuntimeDispatchTrustConfigurationV3(input.trust);
@@ -260,6 +279,7 @@ export function pairOverWebSocket(
 						...(appMeta.icon && { icon: appMeta.icon }),
 						...(appMeta.scopes?.length && { scopes: appMeta.scopes }),
 						...(appMeta.permissions?.length && { permissions: appMeta.permissions }),
+						...(appMeta.manifest !== undefined && { manifest: appMeta.manifest }),
 					}),
 				);
 			} catch (err) {
@@ -284,6 +304,7 @@ export function pairOverWebSocket(
 						pairingVersion?: number;
 						trust?: unknown;
 						fingerprint?: string;
+						awaitingApproval?: boolean;
 					};
 				};
 				if (msg.error) {
@@ -291,7 +312,7 @@ export function pairOverWebSocket(
 					return;
 				}
 				if (msg.result?.paired) {
-					const { clientId, clientSecret, relayUrl, app, mcpAppId, appId, pairingVersion, trust, fingerprint } =
+					const { clientId, clientSecret, relayUrl, app, mcpAppId, appId, pairingVersion, trust, fingerprint, awaitingApproval } =
 						msg.result;
 					if (!clientId || !clientSecret || !relayUrl) {
 						settle(() => reject(new Error('Pairing response missing credentials')));
@@ -315,6 +336,7 @@ export function pairOverWebSocket(
 							pairingVersion,
 							trust,
 							fingerprint,
+							awaitingApproval: awaitingApproval === true,
 						})
 							.then(resolve)
 							.catch(reject);
