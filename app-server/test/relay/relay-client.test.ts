@@ -6,9 +6,16 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { AppDescriptor } from '../../src/app-descriptor.js';
-import { connectRelay, pairOverWebSocket } from '../../src/relay/relay-client.js';
+import { connectRelay, pairOverWebSocket, resumeStandalonePairing } from '../../src/relay/relay-client.js';
 import { createStandaloneRelayIdentityController, STANDALONE_SECRET_ROTATE_METHOD } from '../../src/relay/standalone-control.js';
-import { loadStandaloneIdentity, saveStandaloneIdentity, standaloneHubFingerprint, type StandaloneIdentityV2 } from '../../src/relay/standalone-identity.js';
+import {
+	loadStandaloneIdentity,
+	loadStandalonePendingIdentity,
+	saveStandaloneIdentity,
+	standaloneHubFingerprint,
+	type StandaloneIdentityV2,
+} from '../../src/relay/standalone-identity.js';
+import { sha256CanonicalJson } from '../../src/manifest-tools.js';
 import { relayCallerAuthSurface } from '../../src/runtime.js';
 import {
 	BoundedRuntimeDispatchReplayConsumerV3,
@@ -782,6 +789,7 @@ describe('pairOverWebSocket v2 (standalone identity)', () => {
 			identityFilePath: filePath,
 		});
 		expect(result).toEqual({
+			state: 'legacy-complete',
 			privosUrl: 'http://hub.example',
 			clientId: 'client-1',
 			clientSecret: 'secret-1',
@@ -789,6 +797,108 @@ describe('pairOverWebSocket v2 (standalone identity)', () => {
 		});
 		expect(result.pairingVersion).toBeUndefined();
 		await expect(fs.stat(filePath)).rejects.toThrow();
+	});
+
+	it('persists an exact manifest pairing as non-dispatchable pending state and promotes it after restart', async () => {
+		const pendingPath = `${filePath}.pending`;
+		const manifest = {
+			schemaVersion: 3,
+			kind: 'mcp-app',
+			name: 'com.example.pending',
+			version: '1.0.0',
+			title: 'Pending App',
+			description: 'Pending app contract.',
+			permissions: [{
+				scope: 'basic:information',
+				requirement: 'required',
+				context: 'workspace',
+				executionContext: 'both',
+				feature: 'pending.core',
+				reason: 'Identify the installation.',
+			}],
+			resourceManifestTemplate: [],
+		};
+		const manifestDigest = sha256CanonicalJson(manifest);
+		const permissionContractHash = 'P'.repeat(43);
+		const { trust: rawTrust } = trustFixture({ mcpAppId: 'mcp-app-pending', manifestDigest });
+		const trust = rawTrust;
+		let announced: unknown;
+		const PendingWs = class extends EventEmitter {
+			constructor(_url: string) {
+				super();
+				queueMicrotask(() => this.emit('open'));
+			}
+			send(data: string) {
+				announced = JSON.parse(data);
+				queueMicrotask(() => this.emit('message', Buffer.from(JSON.stringify({
+					result: {
+						paired: false,
+						pairingState: 'pending-approval',
+						clientId: 'client-pending',
+						clientSecret: 'secret-pending',
+						relayUrl: 'ws://hub.example/api/v1/mcp-apps.relay',
+						appId: 'mcp-app-pending',
+						pairingVersion: 2,
+						pairingId: 'pairing-pending',
+						oauthClientId: 'client-pending',
+						manifestDigest,
+						permissionContractHash,
+						declaredPermissionCeiling: ['basic:information'],
+						hubKid: trust.hubKid,
+						fingerprint: standaloneHubFingerprint(trust.hubKid),
+					},
+				}))));
+			}
+			close() {}
+		};
+
+		const pending = await pairOverWebSocket(
+			'ws://hub/pair',
+			{ name: 'Pending App', manifest },
+			PendingWs as unknown as typeof import('ws').default,
+			{ identityFilePath: filePath, pendingIdentityFilePath: pendingPath, onFingerprint: () => undefined },
+		);
+		expect(pending).toMatchObject({ state: 'pending-approval', manifestDigest, pendingIdentityFilePath: pendingPath });
+		expect((announced as any).manifest).toEqual(manifest);
+		expect(loadStandalonePendingIdentity({ filePath: pendingPath }).identity.clientId).toBe('client-pending');
+		await expect(fs.stat(filePath)).rejects.toThrow();
+
+		const CompletionWs = class extends EventEmitter {
+			constructor(_url: string, _options: unknown) {
+				super();
+				queueMicrotask(() => this.emit('message', Buffer.from(JSON.stringify({
+					result: {
+						paired: true,
+						pairingState: 'complete',
+						clientId: 'client-pending',
+						clientSecret: 'secret-pending',
+						relayUrl: 'ws://hub.example/api/v1/mcp-apps.relay',
+						appId: 'mcp-app-pending',
+						pairingVersion: 2,
+						pairingId: 'pairing-pending',
+						oauthClientId: 'client-pending',
+						manifestDigest,
+						permissionContractHash,
+						declaredPermissionCeiling: ['basic:information'],
+						approvedPermissionCeiling: ['basic:information'],
+						hubKid: trust.hubKid,
+						fingerprint: standaloneHubFingerprint(trust.hubKid),
+						trust,
+					},
+				}))));
+			}
+			close() {}
+		};
+		const completed = await resumeStandalonePairing({
+			identityFilePath: filePath,
+			pendingIdentityFilePath: pendingPath,
+			fetchImpl: (async () => ({ ok: true, json: async () => ({ access_token: 'token' }) })) as unknown as typeof fetch,
+			WebSocketImpl: CompletionWs as unknown as typeof import('ws').default,
+			onFingerprint: () => undefined,
+		});
+		expect(completed).toMatchObject({ state: 'complete', identityFilePath: filePath, manifestDigest });
+		expect(loadStandaloneIdentity({ filePath }).identity.mcpAppId).toBe('mcp-app-pending');
+		await expect(fs.stat(pendingPath)).rejects.toThrow();
 	});
 
 	it('rejects a v2 response whose trust is malformed instead of silently degrading to v1', async () => {
