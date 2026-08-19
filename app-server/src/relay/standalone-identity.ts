@@ -30,7 +30,7 @@ const IDENTITY_REQUIRED_KEYS = [
 	'fingerprint',
 	'pairedAt',
 ] as const;
-const IDENTITY_OPTIONAL_KEYS = ['mcpAppId', 'rotatedAt'] as const;
+const IDENTITY_OPTIONAL_KEYS = ['mcpAppId', 'rotatedAt', 'agentBotCredential'] as const;
 
 export type StandaloneIdentityV2 = Readonly<{
 	pairingVersion: 2;
@@ -47,6 +47,12 @@ export type StandaloneIdentityV2 = Readonly<{
 	pairedAt: number;
 	/** Unix ms of the most recent secret or trust rotation, if any. */
 	rotatedAt?: number;
+	/**
+	 * The app's installation-bot credential, delivered over the standalone
+	 * control channel and persisted here so it survives a restart. Opaque pair —
+	 * never logged. Absent until Hub delivers it.
+	 */
+	agentBotCredential?: Readonly<{ botUserId: string; token: string }>;
 }>;
 
 export type LoadedStandaloneIdentity = Readonly<{
@@ -114,6 +120,19 @@ export function assertStandaloneIdentityShape(value: unknown): asserts value is 
 		(value.rotatedAt !== undefined && !Number.isFinite(value.rotatedAt))
 	) {
 		throw new StandaloneIdentityError('IDENTITY_FILE_INVALID', 'Standalone identity file has an invalid field.');
+	}
+	if (value.agentBotCredential !== undefined) {
+		const credential = value.agentBotCredential;
+		if (
+			!isRecord(credential) ||
+			Object.keys(credential).sort().join(',') !== 'botUserId,token' ||
+			typeof credential.botUserId !== 'string' ||
+			!credential.botUserId ||
+			typeof credential.token !== 'string' ||
+			!credential.token
+		) {
+			throw new StandaloneIdentityError('IDENTITY_FILE_INVALID', 'Standalone identity agentBotCredential is invalid.');
+		}
 	}
 	try {
 		new URL(value.relayUrl);

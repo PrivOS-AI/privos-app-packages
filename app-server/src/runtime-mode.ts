@@ -30,7 +30,10 @@ export type RuntimeModeResolution = Readonly<{
 	standaloneIdentityFilePath: string;
 }>;
 
-export type RuntimeModeErrorCode = 'AMBIGUOUS_RUNTIME_IDENTITY' | 'PRODUCTION_WITHOUT_IDENTITY';
+export type RuntimeModeErrorCode =
+	| 'AMBIGUOUS_RUNTIME_IDENTITY'
+	| 'PRODUCTION_WITHOUT_IDENTITY'
+	| 'TRANSPORT_OVERRIDE_NOT_ALLOWED';
 
 export class RuntimeModeError extends Error {
 	constructor(

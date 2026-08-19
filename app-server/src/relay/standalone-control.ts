@@ -25,6 +25,7 @@ import {
 	assertRuntimeDispatchTrustConfigurationV3,
 	type RuntimeDispatchTrustV3,
 } from '../workload/dispatch-assertion.js';
+import { setAdoptedAgentBotCredential } from './agent-bot-credential.js';
 import {
 	loadStandaloneIdentity,
 	rotateStandaloneIdentity,
@@ -36,17 +37,20 @@ import {
 export const STANDALONE_SECRET_ROTATE_METHOD = 'notifications/privos.standaloneSecretRotate';
 export const STANDALONE_TRUST_ROTATE_METHOD = 'notifications/privos.standaloneTrustRotate';
 export const STANDALONE_CAPABILITIES_CHANGED_METHOD = 'notifications/privos.standaloneCapabilitiesChanged';
+export const STANDALONE_AGENT_BOT_CREDENTIAL_METHOD = 'notifications/privos.agentBotCredential';
 
 const CONTROL_METHODS: ReadonlySet<string> = new Set([
 	STANDALONE_SECRET_ROTATE_METHOD,
 	STANDALONE_TRUST_ROTATE_METHOD,
 	STANDALONE_CAPABILITIES_CHANGED_METHOD,
+	STANDALONE_AGENT_BOT_CREDENTIAL_METHOD,
 ]);
 
 export function isStandaloneControlMethod(method: unknown): method is
 	| typeof STANDALONE_SECRET_ROTATE_METHOD
 	| typeof STANDALONE_TRUST_ROTATE_METHOD
-	| typeof STANDALONE_CAPABILITIES_CHANGED_METHOD {
+	| typeof STANDALONE_CAPABILITIES_CHANGED_METHOD
+	| typeof STANDALONE_AGENT_BOT_CREDENTIAL_METHOD {
 	return typeof method === 'string' && CONTROL_METHODS.has(method);
 }
 
@@ -62,6 +66,7 @@ const CONTROL_TYPE_BY_METHOD: Readonly<Record<string, string>> = {
 	[STANDALONE_SECRET_ROTATE_METHOD]: 'standalone-secret-rotate',
 	[STANDALONE_TRUST_ROTATE_METHOD]: 'standalone-trust-rotate',
 	[STANDALONE_CAPABILITIES_CHANGED_METHOD]: 'standalone-capabilities-changed',
+	[STANDALONE_AGENT_BOT_CREDENTIAL_METHOD]: 'standalone-agent-bot-credential',
 };
 const MAX_CONTROL_COMPACT_BYTES = 32_768;
 const DEFAULT_REPLAY_CAPACITY = 64;
@@ -269,6 +274,19 @@ function assertTrustRotateData(value: unknown, current: RuntimeDispatchTrustV3):
 	}
 }
 
+function assertAgentBotCredentialData(value: unknown): asserts value is { botUserId: string; token: string } {
+	if (
+		!isRecord(value) ||
+		!exactKeys(value, ['botUserId', 'token']) ||
+		typeof value.botUserId !== 'string' ||
+		!value.botUserId ||
+		typeof value.token !== 'string' ||
+		!value.token
+	) {
+		throw new StandaloneControlError('standalone_control_agent_bot_credential_data_invalid');
+	}
+}
+
 function assertCapabilitiesChangedData(value: unknown): asserts value is { scopes: string[]; grantEpoch: number } {
 	if (
 		!isRecord(value) ||
@@ -353,6 +371,32 @@ export function createStandaloneRelayIdentityController(
 		options.onRotated?.(current);
 	}
 
+	async function applyAgentBotCredential(assertionCompact: unknown): Promise<void> {
+		if (typeof assertionCompact !== 'string') throw new StandaloneControlError('standalone_control_assertion_invalid');
+		const verified = verifyStandaloneControlAssertion<unknown>({
+			method: STANDALONE_AGENT_BOT_CREDENTIAL_METHOD,
+			compact: assertionCompact,
+			trust: current.trust,
+			replay,
+			now: now(),
+			clockSkewSeconds,
+		});
+		assertAgentBotCredentialData(verified.data);
+		const { botUserId, token } = verified.data;
+		// Persist into the identity file so the credential survives a restart,
+		// then adopt it in-process so the running app uses it HOT — no restart.
+		// Env always overrides the adopted value (operator override preserved).
+		const rotated = await rotateStandaloneIdentity(
+			(identity): StandaloneIdentityV2 => ({ ...identity, agentBotCredential: { botUserId, token }, rotatedAt: Date.now() }),
+			{ filePath: current.filePath },
+		);
+		current = rotated;
+		setAdoptedAgentBotCredential({ botUserId, token });
+		// The token is never logged; only that a delivery landed.
+		options.logger?.('standalone.identity.agent_bot_credential_delivered', { filePath: current.filePath });
+		options.onRotated?.(current);
+	}
+
 	async function applyCapabilitiesChanged(assertionCompact: unknown): Promise<void> {
 		if (typeof assertionCompact !== 'string') throw new StandaloneControlError('standalone_control_assertion_invalid');
 		const verified = verifyStandaloneControlAssertion<unknown>({
@@ -396,6 +440,7 @@ export function createStandaloneRelayIdentityController(
 			const assertion = isRecord(params) ? params.assertion : undefined;
 			if (method === STANDALONE_SECRET_ROTATE_METHOD) await applySecretRotate(assertion);
 			else if (method === STANDALONE_TRUST_ROTATE_METHOD) await applyTrustRotate(assertion);
+			else if (method === STANDALONE_AGENT_BOT_CREDENTIAL_METHOD) await applyAgentBotCredential(assertion);
 			else await applyCapabilitiesChanged(assertion);
 			return 'handled';
 		},

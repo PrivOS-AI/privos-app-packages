@@ -143,6 +143,7 @@ export {
 	STANDALONE_SECRET_ROTATE_METHOD,
 	STANDALONE_TRUST_ROTATE_METHOD,
 	STANDALONE_CAPABILITIES_CHANGED_METHOD,
+	STANDALONE_AGENT_BOT_CREDENTIAL_METHOD,
 	StandaloneControlError,
 	isStandaloneControlMethod,
 	createStandaloneRelayIdentityController,
@@ -162,6 +163,40 @@ export type {
 	StandaloneReadinessReason,
 	StandaloneReadinessResult,
 } from './relay/standalone-readiness.js';
+
+export {
+	AGENT_BOT_CREDENTIAL_ENV_KEY,
+	AGENT_BOT_USER_ID_ENV_KEY,
+	AGENT_BOT_CREDENTIAL_OPERATOR_INSTRUCTION,
+	readAgentBotCredential,
+	getAgentBotCredentialState,
+	setAdoptedAgentBotCredential,
+	markAgentBotCredentialLive,
+	markAgentBotCredentialRejected,
+	resetAgentBotCredentialOutcomeForTests,
+} from './relay/agent-bot-credential.js';
+export type { AgentBotCredential, AgentBotCredentialState } from './relay/agent-bot-credential.js';
+export {
+	createAgentBotHubClient,
+	createAgentBotHubClientFromWorkloadIdentity,
+	createAgentBotHubClientFromHubOrigin,
+	AgentBotCredentialAbsentError,
+	AgentBotHubUnreachableError,
+} from './relay/hub-rest-as-bot-client.js';
+export type {
+	RoomBoundHubClient,
+	RoomBoundHubFetchInit,
+	AgentBotHubClientOptions,
+} from './relay/hub-rest-as-bot-client.js';
+
+export { serveApp, DEFAULT_SERVE_APP_PORT } from './serve-app.js';
+export type {
+	ServeAppOptions,
+	ServeAppHandle,
+	ServeAppHandlerContext,
+	ServeAppTransportOverride,
+	ServeAppTestSeams,
+} from './serve-app.js';
 
 export { resolveRuntimeMode, RuntimeModeError } from './runtime-mode.js';
 export type {
