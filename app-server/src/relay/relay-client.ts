@@ -35,8 +35,11 @@ import {
 	type StandaloneRelayIdentityController,
 } from './standalone-control.js';
 import {
+	resolveIdentityFilePath,
 	saveStandaloneIdentity,
 	standaloneHubFingerprint,
+	standaloneIdentityFileExists,
+	StandaloneIdentityError,
 	type StandaloneIdentityV2,
 } from './standalone-identity.js';
 import {
@@ -197,6 +200,22 @@ export function pairOverWebSocket(
 ): Promise<PairingResult> {
 	const timeoutMs = options?.timeoutMs ?? DEFAULT_PAIRING_TIMEOUT_MS;
 	const persistIdentityFile = options?.persistIdentityFile ?? true;
+
+	// Fail fast BEFORE registering: an existing identity file makes the persist
+	// step (or the poll loop in pairAndAwaitApproval) throw at the very end, but
+	// only after the WebSocket handshake has already registered a fresh pending
+	// row on the Hub — every retry then churns a dead installation there. Refuse
+	// up front with the same error so re-pairing never touches the Hub until the
+	// operator has removed the stale file or chosen rotation.
+	if (persistIdentityFile && standaloneIdentityFileExists({ filePath: options?.identityFilePath })) {
+		const filePath = resolveIdentityFilePath(options?.identityFilePath);
+		return Promise.reject(
+			new StandaloneIdentityError(
+				'IDENTITY_FILE_ALREADY_EXISTS',
+				`Standalone identity file ${filePath} already exists. Remove it before re-pairing, or use rotation for an in-place credential change.`,
+			),
+		);
+	}
 
 	return new Promise((resolve, reject) => {
 		const ws = new WebSocketImpl(pairUrl);

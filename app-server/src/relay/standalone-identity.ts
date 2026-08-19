@@ -96,7 +96,7 @@ export function standaloneHubFingerprint(hubKid: string): string {
 	return `SHA256:${hubKid}`;
 }
 
-function resolveIdentityFilePath(explicit?: string): string {
+export function resolveIdentityFilePath(explicit?: string): string {
 	return path.resolve(explicit ?? process.env.PRIVOS_STANDALONE_IDENTITY_FILE ?? DEFAULT_STANDALONE_IDENTITY_FILE);
 }
 

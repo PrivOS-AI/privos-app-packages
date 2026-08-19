@@ -152,4 +152,23 @@ describe('pairAndAwaitApproval', () => {
 			}),
 		).rejects.toThrow(/expired/i);
 	});
+
+	it('fails fast on an existing identity file without ever registering on the Hub', async () => {
+		// A stale identity file must abort BEFORE the WebSocket handshake, so a
+		// retry never registers a fresh pending row (and churns a dead install).
+		await fs.writeFile(identityFile, '{}', { mode: 0o600 });
+		let polled = false;
+		const fetchImpl = (async () => {
+			polled = true;
+			return new Response('{}', { status: 200 });
+		}) as typeof fetch;
+		await expect(
+			pairAndAwaitApproval(PAIR_URL, { name: 'App', version: '1.0.0', manifest: {} }, RegisterThenAwaitWs as never, {
+				fetchImpl,
+				identityFilePath: identityFile,
+			}),
+		).rejects.toThrow(/already exists/i);
+		expect(RegisterThenAwaitWs.instances).toHaveLength(0);
+		expect(polled).toBe(false);
+	});
 });
