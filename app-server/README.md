@@ -2,6 +2,13 @@
 
 Business-agnostic PrivOS MCP App server runtime for **Direct HTTP** and **Relay WebSocket**.
 
+> **0.8.0 breaking change.** `PairingResult` is now a discriminated union
+> (`legacy-complete` / `pending-approval` / `complete`) with a required `state`
+> field, and `resumeStandalonePairing()` is added for durable app-announced
+> manifest pairing. Callers that read `pairing.trust`/`pairing.pairingVersion`
+> directly must branch on `pairing.state` first. Apps that only use `serveApp`
+> are unaffected. See [Standalone production mode](#standalone-production-mode-relay-pairing).
+
 ## Install
 
 ```bash
