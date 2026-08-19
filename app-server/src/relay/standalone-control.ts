@@ -333,6 +333,21 @@ export function createStandaloneRelayIdentityController(
 		updatedAt: Date.now(),
 	});
 	const listeners = new Set<(next: StandaloneEffectiveCapabilities) => void>();
+	let credentialDeliveryTail: Promise<void> = Promise.resolve();
+
+	async function runCredentialDeliveryExclusively<T>(operation: () => Promise<T>): Promise<T> {
+		let release!: () => void;
+		const previous = credentialDeliveryTail;
+		credentialDeliveryTail = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		await previous;
+		try {
+			return await operation();
+		} finally {
+			release();
+		}
+	}
 
 	async function applySecretRotate(assertionCompact: unknown): Promise<void> {
 		if (typeof assertionCompact !== 'string') throw new StandaloneControlError('standalone_control_assertion_invalid');
@@ -476,7 +491,7 @@ export function createStandaloneRelayIdentityController(
 			const assertion = isRecord(params) ? params.assertion : undefined;
 			if (method === STANDALONE_SECRET_ROTATE_METHOD) await applySecretRotate(assertion);
 			else if (method === STANDALONE_TRUST_ROTATE_METHOD) await applyTrustRotate(assertion);
-			else if (method === STANDALONE_AGENT_BOT_CREDENTIAL_METHOD) return applyAgentBotCredential(assertion);
+			else if (method === STANDALONE_AGENT_BOT_CREDENTIAL_METHOD) return runCredentialDeliveryExclusively(() => applyAgentBotCredential(assertion));
 			else await applyCapabilitiesChanged(assertion);
 			return 'handled';
 		},

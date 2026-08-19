@@ -3,7 +3,22 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const controlledIdentityRotation = vi.hoisted(() => ({
+	handler: undefined as undefined | ((...args: never[]) => Promise<never>),
+}));
+
+vi.mock('../../src/relay/standalone-identity.js', async (importOriginal) => {
+	const actual = await importOriginal<typeof import('../../src/relay/standalone-identity.js')>();
+	return {
+		...actual,
+		rotateStandaloneIdentity: (...args: Parameters<typeof actual.rotateStandaloneIdentity>) => {
+			const handler = controlledIdentityRotation.handler as undefined | typeof actual.rotateStandaloneIdentity;
+			return handler ? handler(...args) : actual.rotateStandaloneIdentity(...args);
+		},
+	};
+});
 
 import {
 	AGENT_BOT_CREDENTIAL_ENV_KEY,
@@ -20,6 +35,7 @@ import {
 } from '../../src/relay/standalone-control.js';
 import {
 	loadStandaloneIdentity,
+	rotateStandaloneIdentity,
 	saveStandaloneIdentity,
 	standaloneHubFingerprint,
 	type StandaloneIdentityV2,
@@ -121,11 +137,140 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+	controlledIdentityRotation.handler = undefined;
 	await fs.rm(tempDirectory, { recursive: true, force: true });
 	resetAgentBotCredentialOutcomeForTests();
 });
 
 describe('agent-bot credential delivery over the standalone control channel', () => {
+	it('serializes overlapping credential persistence so the highest delivery version remains durable and adopted', async () => {
+		const { privateKey, trust } = keyPairAndTrust();
+		await saveStandaloneIdentity(identityFixture(trust), { filePath });
+		const controller = createStandaloneRelayIdentityController(loadStandaloneIdentity({ filePath }), { now: () => 2_000_000_000 });
+		let releaseFirstPersistence!: () => void;
+		const firstPersistenceGate = new Promise<void>((resolve) => {
+			releaseFirstPersistence = resolve;
+		});
+		let signalFirstPersistence!: () => void;
+		const firstPersistenceStarted = new Promise<void>((resolve) => {
+			signalFirstPersistence = resolve;
+		});
+		let secondPersistenceStarted = false;
+
+		const controlledRotate: typeof rotateStandaloneIdentity = async (mutate, rotateOptions) => {
+			const next = mutate(loadStandaloneIdentity({ filePath: rotateOptions?.filePath }).identity);
+			const version = next.agentBotCredential?.deliveryVersion;
+			if (version === 1) {
+				signalFirstPersistence();
+				await firstPersistenceGate;
+			}
+			if (version === 2) secondPersistenceStarted = true;
+			await fs.writeFile(filePath, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
+			await fs.chmod(filePath, 0o600);
+			return loadStandaloneIdentity({ filePath });
+		};
+		controlledIdentityRotation.handler = controlledRotate as unknown as (...args: never[]) => Promise<never>;
+
+		const delivery = (deliveryVersion: number, token: string) =>
+			controller.handleControlNotification(STANDALONE_AGENT_BOT_CREDENTIAL_METHOD, {
+				assertion: signControlAssertion({
+					privateKey,
+					kid: trust.hubKid,
+					type: 'standalone-agent-bot-credential',
+					deploymentId: trust.affinity.deploymentId,
+					mcpAppId: trust.affinity.mcpAppId,
+					data: { botUserId: 'bot-user-99', token, runtimeInstallationId: trust.affinity.runtimeInstallationId, deliveryVersion },
+					now: 2_000_000_000,
+				}),
+			});
+
+		const first = delivery(1, 'test-overlap-v1');
+		await firstPersistenceStarted;
+		const second = delivery(2, 'test-overlap-v2');
+		try {
+			expect(secondPersistenceStarted).toBe(false);
+		} finally {
+			releaseFirstPersistence();
+			await Promise.allSettled([first, second]);
+			controlledIdentityRotation.handler = undefined;
+		}
+
+		expect(await first).toEqual({
+			mcpAppId: trust.affinity.mcpAppId,
+			runtimeInstallationId: trust.affinity.runtimeInstallationId,
+			deliveryVersion: 1,
+		});
+		expect(await second).toEqual({
+			mcpAppId: trust.affinity.mcpAppId,
+			runtimeInstallationId: trust.affinity.runtimeInstallationId,
+			deliveryVersion: 2,
+		});
+		const persisted = loadStandaloneIdentity({ filePath }).identity.agentBotCredential;
+		expect(persisted?.deliveryVersion).toBe(2);
+		expect(tokenFingerprint(persisted?.token ?? '')).toBe(tokenFingerprint('test-overlap-v2'));
+		expect(tokenFingerprint(readAgentBotCredential()?.token ?? '')).toBe(tokenFingerprint('test-overlap-v2'));
+	});
+
+	it('continues queued credential delivery after a persistence failure', async () => {
+		const { privateKey, trust } = keyPairAndTrust();
+		await saveStandaloneIdentity(identityFixture(trust), { filePath });
+		const controller = createStandaloneRelayIdentityController(loadStandaloneIdentity({ filePath }), { now: () => 2_000_000_000 });
+		const delivery = (deliveryVersion: number, token: string) =>
+			controller.handleControlNotification(STANDALONE_AGENT_BOT_CREDENTIAL_METHOD, {
+				assertion: signControlAssertion({
+					privateKey,
+					kid: trust.hubKid,
+					type: 'standalone-agent-bot-credential',
+					deploymentId: trust.affinity.deploymentId,
+					mcpAppId: trust.affinity.mcpAppId,
+					data: { botUserId: 'bot-user-99', token, runtimeInstallationId: trust.affinity.runtimeInstallationId, deliveryVersion },
+					now: 2_000_000_000,
+				}),
+			});
+
+		const failedRotate: typeof rotateStandaloneIdentity = async () => {
+			throw new Error('test persistence failure');
+		};
+		controlledIdentityRotation.handler = failedRotate as unknown as (...args: never[]) => Promise<never>;
+		await expect(delivery(1, 'test-failed-persistence')).rejects.toThrow('test persistence failure');
+		expect(readAgentBotCredential()).toBeNull();
+
+		controlledIdentityRotation.handler = undefined;
+		expect(await delivery(2, 'test-after-persistence-failure')).toEqual({
+			mcpAppId: trust.affinity.mcpAppId,
+			runtimeInstallationId: trust.affinity.runtimeInstallationId,
+			deliveryVersion: 2,
+		});
+		expect(loadStandaloneIdentity({ filePath }).identity.agentBotCredential?.deliveryVersion).toBe(2);
+		expect(tokenFingerprint(readAgentBotCredential()?.token ?? '')).toBe(tokenFingerprint('test-after-persistence-failure'));
+	});
+
+	it('continues queued credential delivery after a rejected assertion', async () => {
+		const { privateKey, trust } = keyPairAndTrust();
+		await saveStandaloneIdentity(identityFixture(trust), { filePath });
+		const controller = createStandaloneRelayIdentityController(loadStandaloneIdentity({ filePath }), { now: () => 2_000_000_000 });
+		const delivery = (runtimeInstallationId: string, deliveryVersion: number, token: string) =>
+			controller.handleControlNotification(STANDALONE_AGENT_BOT_CREDENTIAL_METHOD, {
+				assertion: signControlAssertion({
+					privateKey,
+					kid: trust.hubKid,
+					type: 'standalone-agent-bot-credential',
+					deploymentId: trust.affinity.deploymentId,
+					mcpAppId: trust.affinity.mcpAppId,
+					data: { botUserId: 'bot-user-99', token, runtimeInstallationId, deliveryVersion },
+					now: 2_000_000_000,
+				}),
+			});
+
+		await expect(delivery('wrong-installation', 1, 'test-rejected-credential')).rejects.toThrow();
+		expect(await delivery(trust.affinity.runtimeInstallationId, 1, 'test-after-rejection')).toEqual({
+			mcpAppId: trust.affinity.mcpAppId,
+			runtimeInstallationId: trust.affinity.runtimeInstallationId,
+			deliveryVersion: 1,
+		});
+		expect(loadStandaloneIdentity({ filePath }).identity.agentBotCredential?.deliveryVersion).toBe(1);
+	});
+
 	it('persists a newer valid signed credential before returning its secret-free receipt and hot-adopting it', async () => {
 		const { privateKey, trust } = keyPairAndTrust();
 		await saveStandaloneIdentity(identityFixture(trust), { filePath });
