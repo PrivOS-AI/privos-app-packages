@@ -7,7 +7,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { AppDescriptor } from '../../src/app-descriptor.js';
 import { connectRelay, pairOverWebSocket, resumeStandalonePairing } from '../../src/relay/relay-client.js';
-import { createStandaloneRelayIdentityController, STANDALONE_SECRET_ROTATE_METHOD } from '../../src/relay/standalone-control.js';
+import {
+	createStandaloneRelayIdentityController,
+	STANDALONE_AGENT_BOT_CREDENTIAL_METHOD,
+	STANDALONE_SECRET_ROTATE_METHOD,
+} from '../../src/relay/standalone-control.js';
 import {
 	loadStandaloneIdentity,
 	loadStandalonePendingIdentity,
@@ -1207,6 +1211,111 @@ describe('connectRelay with standaloneIdentity', () => {
 		await vi.waitFor(() => expect(controller.getCredentials().clientId).toBe('client-2'));
 		expect(handler).not.toHaveBeenCalled();
 		expect(ws.sent).toHaveLength(0);
+		await handle.stop();
+	});
+
+	it('acknowledges an identified durable agent-bot credential request without exposing its token', async () => {
+		const { privateKey, trust } = trustFixture();
+		const loaded = await seedIdentity(trust);
+		const now = 2_000_000_000;
+		const controller = createStandaloneRelayIdentityController(loaded, { now: () => now });
+		const token = 'test-relay-credential-v1';
+
+		FakeWebSocket.instances = [];
+		const handler = vi.fn(async () => ({ ok: true }));
+		const handle = connectRelay({
+			privosUrl: 'https://hub.example',
+			standaloneIdentity: controller,
+			descriptor,
+			handler,
+			fetchImpl: (async () => ({ ok: true, json: async () => ({ access_token: 'tok' }) })) as unknown as typeof fetch,
+			WebSocketImpl: FakeWebSocket as unknown as typeof import('ws').default,
+		});
+		await handle.whenConnected();
+		const ws = FakeWebSocket.instances[0]!;
+
+		const assertion = signControlAssertion({
+			privateKey,
+			kid: trust.hubKid,
+			type: 'standalone-agent-bot-credential',
+			deploymentId: trust.affinity.deploymentId,
+			mcpAppId: trust.affinity.mcpAppId,
+			data: {
+				botUserId: 'bot-user-99',
+				token,
+				runtimeInstallationId: trust.affinity.runtimeInstallationId,
+				deliveryVersion: 1,
+			},
+			now,
+		});
+		ws.emit(
+			'message',
+			Buffer.from(
+				JSON.stringify({
+					jsonrpc: '2.0',
+					id: 421,
+					method: STANDALONE_AGENT_BOT_CREDENTIAL_METHOD,
+					params: { assertion },
+				}),
+			),
+		);
+
+		await vi.waitFor(() => expect(ws.sent).toHaveLength(1));
+		expect(JSON.parse(ws.sent[0]!)).toEqual({
+			jsonrpc: '2.0',
+			id: 421,
+			result: {
+				mcpAppId: trust.affinity.mcpAppId,
+				runtimeInstallationId: trust.affinity.runtimeInstallationId,
+				deliveryVersion: 1,
+			},
+		});
+		expect(ws.sent[0]).not.toContain(token);
+		expect(handler).not.toHaveBeenCalled();
+		await handle.stop();
+	});
+
+	it('never emits a success receipt for a rejected identified agent-bot credential request', async () => {
+		const { privateKey, trust } = trustFixture();
+		const loaded = await seedIdentity(trust);
+		const now = 2_000_000_000;
+		const controller = createStandaloneRelayIdentityController(loaded, { now: () => now });
+
+		FakeWebSocket.instances = [];
+		const handle = connectRelay({
+			privosUrl: 'https://hub.example',
+			standaloneIdentity: controller,
+			descriptor,
+			handler: async () => ({ ok: true }),
+			fetchImpl: (async () => ({ ok: true, json: async () => ({ access_token: 'tok' }) })) as unknown as typeof fetch,
+			WebSocketImpl: FakeWebSocket as unknown as typeof import('ws').default,
+		});
+		await handle.whenConnected();
+		const ws = FakeWebSocket.instances[0]!;
+		const assertion = signControlAssertion({
+			privateKey,
+			kid: trust.hubKid,
+			type: 'standalone-agent-bot-credential',
+			deploymentId: trust.affinity.deploymentId,
+			mcpAppId: trust.affinity.mcpAppId,
+			data: {
+				botUserId: 'bot-user-99',
+				token: 'test-relay-rejected-credential',
+				runtimeInstallationId: 'installation-other',
+				deliveryVersion: 1,
+			},
+			now,
+		});
+		ws.emit(
+			'message',
+			Buffer.from(JSON.stringify({ jsonrpc: '2.0', id: 422, method: STANDALONE_AGENT_BOT_CREDENTIAL_METHOD, params: { assertion } })),
+		);
+
+		await vi.waitFor(() => expect(ws.sent).toHaveLength(1));
+		const response = JSON.parse(ws.sent[0]!) as { id: number; result?: unknown; error?: unknown };
+		expect(response.id).toBe(422);
+		expect(response.result).toBeUndefined();
+		expect(response.error).toBeDefined();
 		await handle.stop();
 	});
 

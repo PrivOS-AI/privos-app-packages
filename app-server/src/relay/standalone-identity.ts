@@ -69,7 +69,12 @@ export type StandaloneIdentityV2 = Readonly<{
 	 * control channel and persisted here so it survives a restart. Opaque pair —
 	 * never logged. Absent until Hub delivers it.
 	 */
-	agentBotCredential?: Readonly<{ botUserId: string; token: string }>;
+	agentBotCredential?: Readonly<{
+		botUserId: string;
+		token: string;
+		/** Monotonic Hub delivery epoch; absent only on identities persisted before acknowledgement support. */
+		deliveryVersion?: number;
+	}>;
 }>;
 
 /**
@@ -180,11 +185,13 @@ export function assertStandaloneIdentityShape(value: unknown): asserts value is 
 		const credential = value.agentBotCredential;
 		if (
 			!isRecord(credential) ||
-			Object.keys(credential).sort().join(',') !== 'botUserId,token' ||
+			!['botUserId,token', 'botUserId,deliveryVersion,token'].includes(Object.keys(credential).sort().join(',')) ||
 			typeof credential.botUserId !== 'string' ||
 			!credential.botUserId ||
 			typeof credential.token !== 'string' ||
-			!credential.token
+			!credential.token ||
+			(credential.deliveryVersion !== undefined &&
+				(!Number.isSafeInteger(credential.deliveryVersion) || Number(credential.deliveryVersion) <= 0))
 		) {
 			throw new StandaloneIdentityError('IDENTITY_FILE_INVALID', 'Standalone identity agentBotCredential is invalid.');
 		}

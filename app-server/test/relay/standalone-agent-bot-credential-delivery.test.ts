@@ -11,7 +11,9 @@ import {
 	getAgentBotCredentialState,
 	readAgentBotCredential,
 	resetAgentBotCredentialOutcomeForTests,
+	setAdoptedAgentBotCredential,
 } from '../../src/relay/agent-bot-credential.js';
+import { createAgentBotHubClient } from '../../src/relay/hub-rest-as-bot-client.js';
 import {
 	createStandaloneRelayIdentityController,
 	STANDALONE_AGENT_BOT_CREDENTIAL_METHOD,
@@ -37,6 +39,7 @@ function canonicalize(value: unknown): unknown {
 	return value;
 }
 const canonical = (value: unknown): string => JSON.stringify(canonicalize(value));
+const tokenFingerprint = (token: string): string => crypto.createHash('sha256').update(token, 'utf8').digest('base64url');
 
 function keyPairAndTrust() {
 	const pair = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
@@ -123,12 +126,13 @@ afterEach(async () => {
 });
 
 describe('agent-bot credential delivery over the standalone control channel', () => {
-	it('persists a valid signed credential into the identity file and adopts it in-process (hot)', async () => {
+	it('persists a newer valid signed credential before returning its secret-free receipt and hot-adopting it', async () => {
 		const { privateKey, trust } = keyPairAndTrust();
 		await saveStandaloneIdentity(identityFixture(trust), { filePath });
 		const loaded = loadStandaloneIdentity({ filePath });
 		const now = 2_000_000_000;
 		const controller = createStandaloneRelayIdentityController(loaded, { now: () => now });
+		const token = 'test-credential-v1';
 
 		// Before delivery: no credential is readable.
 		expect(readAgentBotCredential()).toBeNull();
@@ -140,20 +144,52 @@ describe('agent-bot credential delivery over the standalone control channel', ()
 			type: 'standalone-agent-bot-credential',
 			deploymentId: trust.affinity.deploymentId,
 			mcpAppId: trust.affinity.mcpAppId,
-			data: { botUserId: 'bot-user-99', token: 'delivered-token-not-a-real-secret' },
+			data: {
+				botUserId: 'bot-user-99',
+				token,
+				runtimeInstallationId: trust.affinity.runtimeInstallationId,
+				deliveryVersion: 1,
+			},
 			now,
 		});
 
 		const outcome = await controller.handleControlNotification(STANDALONE_AGENT_BOT_CREDENTIAL_METHOD, { assertion });
-		expect(outcome).toBe('handled');
+		expect(outcome).toEqual({
+			mcpAppId: trust.affinity.mcpAppId,
+			runtimeInstallationId: trust.affinity.runtimeInstallationId,
+			deliveryVersion: 1,
+		});
+		expect(JSON.stringify(outcome)).not.toContain(token);
 
 		// Hot: usable immediately, no restart.
-		expect(readAgentBotCredential()).toEqual({ botUserId: 'bot-user-99', token: 'delivered-token-not-a-real-secret' });
+		expect(readAgentBotCredential()?.botUserId).toBe('bot-user-99');
+		expect(tokenFingerprint(readAgentBotCredential()!.token)).toBe(tokenFingerprint(token));
 		expect(getAgentBotCredentialState()).toBe('live');
 
 		// Durable: persisted into the identity file for the next boot.
 		const persisted = loadStandaloneIdentity({ filePath });
-		expect(persisted.identity.agentBotCredential).toEqual({ botUserId: 'bot-user-99', token: 'delivered-token-not-a-real-secret' });
+		expect(persisted.identity.agentBotCredential?.botUserId).toBe('bot-user-99');
+		expect(persisted.identity.agentBotCredential?.deliveryVersion).toBe(1);
+		expect(tokenFingerprint(persisted.identity.agentBotCredential!.token)).toBe(tokenFingerprint(token));
+
+		// Restart: boot seeding selects the durable credential for installation-bot
+		// Hub calls before another control-channel delivery arrives.
+		resetAgentBotCredentialOutcomeForTests();
+		const restartedCredential = loadStandaloneIdentity({ filePath }).identity.agentBotCredential;
+		expect(restartedCredential?.deliveryVersion).toBe(1);
+		setAdoptedAgentBotCredential(restartedCredential!);
+		const requests: Array<Record<string, string>> = [];
+		const hubClient = createAgentBotHubClient({
+			resolveHubOrigin: async () => 'https://hub.example',
+			fetchImplementation: (async (_url: string, init?: RequestInit) => {
+				requests.push((init?.headers as Record<string, string>) ?? {});
+				return new Response('{}', { status: 200 });
+			}) as typeof fetch,
+		});
+		await hubClient.authorizedFetch('/api/v1/me', { method: 'GET', requiredScope: 'files:read', retryMode: 'safe-methods' });
+		expect(requests).toHaveLength(1);
+		expect(requests[0]?.['x-user-id']).toBe('bot-user-99');
+		expect(tokenFingerprint(requests[0]?.['x-auth-token'] ?? '')).toBe(tokenFingerprint(token));
 	});
 
 	it('rejects a credential signed by a key that is not the pinned kid (cold-app refusal)', async () => {
@@ -170,7 +206,12 @@ describe('agent-bot credential delivery over the standalone control channel', ()
 			type: 'standalone-agent-bot-credential',
 			deploymentId: trust.affinity.deploymentId,
 			mcpAppId: trust.affinity.mcpAppId,
-			data: { botUserId: 'bot-user-99', token: 'delivered-token-not-a-real-secret' },
+			data: {
+				botUserId: 'bot-user-99',
+				token: 'test-foreign-credential',
+				runtimeInstallationId: trust.affinity.runtimeInstallationId,
+				deliveryVersion: 1,
+			},
 			now,
 		});
 
@@ -192,10 +233,91 @@ describe('agent-bot credential delivery over the standalone control channel', ()
 			type: 'standalone-agent-bot-credential',
 			deploymentId: trust.affinity.deploymentId,
 			mcpAppId: trust.affinity.mcpAppId,
-			data: { botUserId: 'bot-user-99' }, // missing token
+			data: { botUserId: 'bot-user-99', token: 'test-malformed', runtimeInstallationId: trust.affinity.runtimeInstallationId },
 			now,
 		});
 
 		await expect(controller.handleControlNotification(STANDALONE_AGENT_BOT_CREDENTIAL_METHOD, { assertion })).rejects.toThrow();
+	});
+
+	it('refuses a signed credential for a different runtime installation without adoption or a receipt', async () => {
+		const { privateKey, trust } = keyPairAndTrust();
+		await saveStandaloneIdentity(identityFixture(trust), { filePath });
+		const controller = createStandaloneRelayIdentityController(loadStandaloneIdentity({ filePath }), { now: () => 2_000_000_000 });
+		const assertion = signControlAssertion({
+			privateKey,
+			kid: trust.hubKid,
+			type: 'standalone-agent-bot-credential',
+			deploymentId: trust.affinity.deploymentId,
+			mcpAppId: trust.affinity.mcpAppId,
+			data: { botUserId: 'bot-user-99', token: 'test-wrong-installation', runtimeInstallationId: 'installation-other', deliveryVersion: 1 },
+			now: 2_000_000_000,
+		});
+
+		await expect(controller.handleControlNotification(STANDALONE_AGENT_BOT_CREDENTIAL_METHOD, { assertion })).rejects.toThrow();
+		expect(readAgentBotCredential()).toBeNull();
+		expect(loadStandaloneIdentity({ filePath }).identity.agentBotCredential).toBeUndefined();
+	});
+
+	it('keeps a newer persisted version when a stale or conflicting delivery arrives and acknowledges an exact duplicate idempotently', async () => {
+		const { privateKey, trust } = keyPairAndTrust();
+		await saveStandaloneIdentity(identityFixture(trust), { filePath });
+		const now = 2_000_000_000;
+		const controller = createStandaloneRelayIdentityController(loadStandaloneIdentity({ filePath }), { now: () => now });
+		const deliver = (deliveryVersion: number, token: string) =>
+			controller.handleControlNotification(STANDALONE_AGENT_BOT_CREDENTIAL_METHOD, {
+				assertion: signControlAssertion({
+					privateKey,
+					kid: trust.hubKid,
+					type: 'standalone-agent-bot-credential',
+					deploymentId: trust.affinity.deploymentId,
+					mcpAppId: trust.affinity.mcpAppId,
+					data: { botUserId: 'bot-user-99', token, runtimeInstallationId: trust.affinity.runtimeInstallationId, deliveryVersion },
+					now,
+				}),
+			});
+
+		expect(await deliver(2, 'test-credential-v2')).toEqual({
+			mcpAppId: trust.affinity.mcpAppId,
+			runtimeInstallationId: trust.affinity.runtimeInstallationId,
+			deliveryVersion: 2,
+		});
+		await expect(deliver(1, 'test-credential-v1')).rejects.toThrow();
+		await expect(deliver(2, 'test-substituted-credential-v2')).rejects.toThrow();
+		expect(await deliver(2, 'test-credential-v2')).toEqual({
+			mcpAppId: trust.affinity.mcpAppId,
+			runtimeInstallationId: trust.affinity.runtimeInstallationId,
+			deliveryVersion: 2,
+		});
+
+		const persisted = loadStandaloneIdentity({ filePath }).identity.agentBotCredential;
+		expect(persisted?.deliveryVersion).toBe(2);
+		expect(tokenFingerprint(persisted!.token)).toBe(tokenFingerprint('test-credential-v2'));
+	});
+
+	it('does not adopt or acknowledge a credential when the identity file cannot be atomically rotated', async () => {
+		const { privateKey, trust } = keyPairAndTrust();
+		await saveStandaloneIdentity(identityFixture(trust), { filePath });
+		const controller = createStandaloneRelayIdentityController(loadStandaloneIdentity({ filePath }), { now: () => 2_000_000_000 });
+		await fs.chmod(filePath, 0o400);
+		const assertion = signControlAssertion({
+			privateKey,
+			kid: trust.hubKid,
+			type: 'standalone-agent-bot-credential',
+			deploymentId: trust.affinity.deploymentId,
+			mcpAppId: trust.affinity.mcpAppId,
+			data: {
+				botUserId: 'bot-user-99',
+				token: 'test-persistence-failure',
+				runtimeInstallationId: trust.affinity.runtimeInstallationId,
+				deliveryVersion: 1,
+			},
+			now: 2_000_000_000,
+		});
+
+		await expect(controller.handleControlNotification(STANDALONE_AGENT_BOT_CREDENTIAL_METHOD, { assertion })).rejects.toThrow();
+		expect(readAgentBotCredential()).toBeNull();
+		await fs.chmod(filePath, 0o600);
+		expect(loadStandaloneIdentity({ filePath }).identity.agentBotCredential).toBeUndefined();
 	});
 });

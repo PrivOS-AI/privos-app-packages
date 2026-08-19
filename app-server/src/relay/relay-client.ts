@@ -32,6 +32,7 @@ import {
 import { MessageTooLargeError, rawDataToText } from './message-adapter.js';
 import {
 	isStandaloneControlMethod,
+	STANDALONE_AGENT_BOT_CREDENTIAL_METHOD,
 	type StandaloneRelayIdentityController,
 } from './standalone-control.js';
 import {
@@ -1194,6 +1195,11 @@ export function connectRelay(opts: RelayClientOptions): RelayHandle {
 			parsedJson && typeof parsedJson === 'object' && !Array.isArray(parsedJson)
 				? (parsedJson as Record<string, unknown>)
 				: {};
+		const controlRequestId =
+			Object.prototype.hasOwnProperty.call(transportMsgObj, 'id') &&
+			(typeof transportMsgObj.id === 'string' || typeof transportMsgObj.id === 'number' || transportMsgObj.id === null)
+				? (transportMsgObj.id as string | number | null)
+				: undefined;
 
 		// Standalone-production control channel: secret rotation, trust rotation,
 		// and capabilities push arrive as reserved notifications on this same
@@ -1201,14 +1207,33 @@ export function connectRelay(opts: RelayClientOptions): RelayHandle {
 		// (verified against the currently pinned Hub key) before anything else.
 		if (opts.standaloneIdentity && isStandaloneControlMethod(transportMsgObj.method)) {
 			try {
-				await opts.standaloneIdentity.handleControlNotification(transportMsgObj.method, transportMsgObj.params);
+				const outcome = await opts.standaloneIdentity.handleControlNotification(transportMsgObj.method, transportMsgObj.params);
+				if (transportMsgObj.method === STANDALONE_AGENT_BOT_CREDENTIAL_METHOD && controlRequestId !== undefined) {
+					if (typeof outcome === 'string') {
+						safeSend(ws, errorResponse(controlRequestId, jsonRpcError(INVALID_REQUEST, 'Standalone credential delivery rejected')), {
+							generation,
+							method: transportMsgObj.method,
+						});
+					} else {
+						safeSend(ws, { jsonrpc: '2.0', id: controlRequestId, result: outcome }, {
+							generation,
+							method: transportMsgObj.method,
+						});
+					}
+				}
 				log('relay.standalone_control.applied', { generation, method: transportMsgObj.method });
 			} catch (err) {
 				log('relay.standalone_control.rejected', {
 					generation,
 					method: transportMsgObj.method,
-					message: err instanceof Error ? err.message : String(err),
+					...(err instanceof Error ? { name: err.name } : {}),
 				});
+				if (transportMsgObj.method === STANDALONE_AGENT_BOT_CREDENTIAL_METHOD && controlRequestId !== undefined) {
+					safeSend(ws, errorResponse(controlRequestId, jsonRpcError(INVALID_REQUEST, 'Standalone credential delivery rejected')), {
+						generation,
+						method: transportMsgObj.method,
+					});
+				}
 			}
 			return;
 		}

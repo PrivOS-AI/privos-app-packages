@@ -60,6 +60,13 @@ export type StandaloneEffectiveCapabilities = Readonly<{
 	updatedAt: number;
 }>;
 
+/** Secret-free receipt returned only after a credential version is durable. */
+export type StandaloneAgentBotCredentialReceipt = Readonly<{
+	mcpAppId: string;
+	runtimeInstallationId: string;
+	deliveryVersion: number;
+}>;
+
 const CONTROL_HEADER_KEYS = ['alg', 'kid', 'privos_protocol', 'typ'] as const;
 const CONTROL_PAYLOAD_KEYS = ['aud', 'data', 'exp', 'iat', 'iss', 'jti', 'nonce', 'protocolVersion', 'type'] as const;
 const CONTROL_TYPE_BY_METHOD: Readonly<Record<string, string>> = {
@@ -228,7 +235,7 @@ export interface StandaloneRelayIdentityController {
 	 * Internal seam used by `connectRelay` when a `notifications/privos.standalone*`
 	 * message arrives on an open, authenticated Relay connection. Not for app use.
 	 */
-	handleControlNotification(method: string, params: unknown): Promise<'handled' | 'ignored'>;
+	handleControlNotification(method: string, params: unknown): Promise<'handled' | 'ignored' | StandaloneAgentBotCredentialReceipt>;
 }
 
 export type StandaloneRelayIdentityControllerOptions = Readonly<{
@@ -274,14 +281,20 @@ function assertTrustRotateData(value: unknown, current: RuntimeDispatchTrustV3):
 	}
 }
 
-function assertAgentBotCredentialData(value: unknown): asserts value is { botUserId: string; token: string } {
+function assertAgentBotCredentialData(
+	value: unknown,
+): asserts value is { botUserId: string; token: string; runtimeInstallationId: string; deliveryVersion: number } {
 	if (
 		!isRecord(value) ||
-		!exactKeys(value, ['botUserId', 'token']) ||
+		!exactKeys(value, ['botUserId', 'token', 'runtimeInstallationId', 'deliveryVersion']) ||
 		typeof value.botUserId !== 'string' ||
 		!value.botUserId ||
 		typeof value.token !== 'string' ||
-		!value.token
+		!value.token ||
+		typeof value.runtimeInstallationId !== 'string' ||
+		!value.runtimeInstallationId ||
+		!Number.isSafeInteger(value.deliveryVersion) ||
+		Number(value.deliveryVersion) <= 0
 	) {
 		throw new StandaloneControlError('standalone_control_agent_bot_credential_data_invalid');
 	}
@@ -371,7 +384,7 @@ export function createStandaloneRelayIdentityController(
 		options.onRotated?.(current);
 	}
 
-	async function applyAgentBotCredential(assertionCompact: unknown): Promise<void> {
+	async function applyAgentBotCredential(assertionCompact: unknown): Promise<StandaloneAgentBotCredentialReceipt> {
 		if (typeof assertionCompact !== 'string') throw new StandaloneControlError('standalone_control_assertion_invalid');
 		const verified = verifyStandaloneControlAssertion<unknown>({
 			method: STANDALONE_AGENT_BOT_CREDENTIAL_METHOD,
@@ -382,12 +395,30 @@ export function createStandaloneRelayIdentityController(
 			clockSkewSeconds,
 		});
 		assertAgentBotCredentialData(verified.data);
-		const { botUserId, token } = verified.data;
+		const { botUserId, token, runtimeInstallationId, deliveryVersion } = verified.data;
+		if (runtimeInstallationId !== current.trust.affinity.runtimeInstallationId) {
+			throw new StandaloneControlError('standalone_control_agent_bot_credential_installation_mismatch');
+		}
+		const persistedCredential = current.identity.agentBotCredential;
+		const persistedVersion = persistedCredential?.deliveryVersion ?? 0;
+		if (deliveryVersion < persistedVersion) {
+			throw new StandaloneControlError('standalone_control_agent_bot_credential_stale');
+		}
+		if (deliveryVersion === persistedVersion) {
+			if (!persistedCredential || persistedCredential.botUserId !== botUserId || persistedCredential.token !== token) {
+				throw new StandaloneControlError('standalone_control_agent_bot_credential_version_conflict');
+			}
+			return {
+				mcpAppId: current.trust.affinity.mcpAppId,
+				runtimeInstallationId,
+				deliveryVersion,
+			};
+		}
 		// Persist into the identity file so the credential survives a restart,
 		// then adopt it in-process so the running app uses it HOT — no restart.
 		// Env always overrides the adopted value (operator override preserved).
 		const rotated = await rotateStandaloneIdentity(
-			(identity): StandaloneIdentityV2 => ({ ...identity, agentBotCredential: { botUserId, token }, rotatedAt: Date.now() }),
+			(identity): StandaloneIdentityV2 => ({ ...identity, agentBotCredential: { botUserId, token, deliveryVersion }, rotatedAt: Date.now() }),
 			{ filePath: current.filePath },
 		);
 		current = rotated;
@@ -395,6 +426,11 @@ export function createStandaloneRelayIdentityController(
 		// The token is never logged; only that a delivery landed.
 		options.logger?.('standalone.identity.agent_bot_credential_delivered', { filePath: current.filePath });
 		options.onRotated?.(current);
+		return {
+			mcpAppId: current.trust.affinity.mcpAppId,
+			runtimeInstallationId,
+			deliveryVersion,
+		};
 	}
 
 	async function applyCapabilitiesChanged(assertionCompact: unknown): Promise<void> {
@@ -440,7 +476,7 @@ export function createStandaloneRelayIdentityController(
 			const assertion = isRecord(params) ? params.assertion : undefined;
 			if (method === STANDALONE_SECRET_ROTATE_METHOD) await applySecretRotate(assertion);
 			else if (method === STANDALONE_TRUST_ROTATE_METHOD) await applyTrustRotate(assertion);
-			else if (method === STANDALONE_AGENT_BOT_CREDENTIAL_METHOD) await applyAgentBotCredential(assertion);
+			else if (method === STANDALONE_AGENT_BOT_CREDENTIAL_METHOD) return applyAgentBotCredential(assertion);
 			else await applyCapabilitiesChanged(assertion);
 			return 'handled';
 		},
