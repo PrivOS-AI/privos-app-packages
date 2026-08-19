@@ -298,9 +298,7 @@ export function pairOverWebSocket(
 						settle(() => reject(new Error('Pairing response missing credentials')));
 						return;
 					}
-					const privosUrl = relayUrl
-						.replace(/^ws/, 'http')
-						.replace(/\/api\/v1\/mcp-apps\.relay.*/, '');
+					const privosUrl = relayUrlToPrivosOrigin(relayUrl);
 					const resolvedAppId =
 						(typeof mcpAppId === 'string' && mcpAppId) ||
 						(typeof appId === 'string' && appId) ||
@@ -393,6 +391,17 @@ async function persistPairedV2Identity(
 	};
 }
 
+/**
+ * Normalize a Hub-supplied relay URL (`wss://host/api/v1/mcp-apps.relay`) to the
+ * bare Hub HTTP origin the identity file stores as `relayUrl`/`privosUrl`. serveApp
+ * re-derives BOTH the `wss` connect URL (`privosUrl.replace(/^http/,'ws') + path`)
+ * and the user-token JWKS origin from it, and the JWKS origin validator rejects any
+ * non-http(s) scheme — so a raw `wss://…/mcp-apps.relay` value must never be persisted.
+ */
+function relayUrlToPrivosOrigin(relayUrl: string): string {
+	return relayUrl.replace(/^ws/, 'http').replace(/\/api\/v1\/mcp-apps\.relay.*/, '');
+}
+
 /** Derive the Hub HTTP origin and the `?pair=` token from a `wss://…/mcp-apps.relay?pair=…` URL. */
 function pairPollTarget(pairUrl: string): { origin: string; pairToken: string } {
 	const url = new URL(pairUrl);
@@ -453,7 +462,7 @@ export async function pairAndAwaitApproval(
 		if (body.status === 'approved') {
 			return persistPairedV2Identity(
 				{
-					privosUrl: body.relayUrl ?? registered.privosUrl,
+					privosUrl: body.relayUrl ? relayUrlToPrivosOrigin(body.relayUrl) : registered.privosUrl,
 					clientId: body.clientId ?? registered.clientId,
 					clientSecret: body.clientSecret ?? registered.clientSecret,
 					mcpAppId: body.appId ?? registered.mcpAppId,

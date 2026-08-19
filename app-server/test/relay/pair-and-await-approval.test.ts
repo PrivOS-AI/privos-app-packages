@@ -103,7 +103,10 @@ describe('pairAndAwaitApproval', () => {
 							paired: true,
 							clientId: 'client-1',
 							clientSecret: 'secret-1',
-							relayUrl: 'https://hub.example',
+							// The Hub answers with the wss relay endpoint; the SDK must normalize it to
+							// the bare https origin before persisting — JWKS-origin validation and the
+							// wss re-derivation both require a bare http(s) origin.
+							relayUrl: 'wss://hub.example/api/v1/mcp-apps.relay',
 							appId: 'mcp-app-1',
 							trust,
 							fingerprint,
@@ -125,6 +128,9 @@ describe('pairAndAwaitApproval', () => {
 		const persisted = loadStandaloneIdentity({ filePath: identityFile });
 		expect(persisted.identity.mcpAppId).toBe('mcp-app-1');
 		expect(persisted.fingerprint).toBe(fingerprint);
+		// Regression: the wss relay endpoint the Hub returned must be normalized to
+		// the bare https origin so serveApp's JWKS-origin validation accepts it.
+		expect(persisted.identity.relayUrl).toBe('https://hub.example');
 	});
 
 	it('throws when the Hub rejects the pairing (app removed)', async () => {
