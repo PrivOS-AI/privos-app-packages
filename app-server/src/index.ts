@@ -105,6 +105,7 @@ export type {
 
 export {
 	pairOverWebSocket,
+	pairAndAwaitApproval,
 	pairFromDescriptor,
 	connectRelay,
 } from './relay/relay-client.js';

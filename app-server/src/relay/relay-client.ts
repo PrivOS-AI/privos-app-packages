@@ -97,6 +97,14 @@ export interface PairOverWebSocketOptions {
 	identityFilePath?: string;
 	/** Receives the fingerprint line for out-of-band operator verification; defaults to `console.log`. */
 	onFingerprint?: (fingerprint: string) => void;
+	/** `fetch` used by `pairAndAwaitApproval` to poll for approval. Defaults to the global. */
+	fetchImpl?: typeof fetch;
+	/** How long `pairAndAwaitApproval` waits for an admin to approve. Default 30 min. */
+	approvalTimeoutMs?: number;
+	/** Initial poll interval; backs off 1.5x up to 10s. Default 2s. */
+	pollIntervalMs?: number;
+	/** Called on each poll while still awaiting approval (e.g. to print a heartbeat). */
+	onAwaitingApproval?: () => void;
 }
 
 const BACKOFF_MS = [1_000, 2_000, 5_000, 10_000, 30_000] as const;
@@ -234,39 +242,11 @@ export function pairOverWebSocket(
 					...(input.awaitingApproval ? { awaitingApproval: true } : {}),
 				};
 			}
-			assertRuntimeDispatchTrustConfigurationV3(input.trust);
-			const trust = input.trust;
-			const fingerprint = standaloneHubFingerprint(trust.hubKid);
-			if (input.fingerprint !== undefined && input.fingerprint !== fingerprint) {
-				throw new Error('Pairing response fingerprint does not match the pinned Hub key.');
-			}
-			(options?.onFingerprint ?? ((line: string) => console.log(line)))(
-				`PrivOS Hub fingerprint: ${fingerprint} — verify this out-of-band before trusting dispatch from this Hub.`,
-			);
-			let identityFilePath: string | undefined;
-			if (persistIdentityFile) {
-				const identity: StandaloneIdentityV2 = {
-					pairingVersion: 2,
-					relayUrl: input.privosUrl,
-					clientId: input.clientId,
-					clientSecret: input.clientSecret,
-					trust,
-					fingerprint,
-					...(input.mcpAppId ? { mcpAppId: input.mcpAppId } : {}),
-					pairedAt: Date.now(),
-				};
-				identityFilePath = await saveStandaloneIdentity(identity, { filePath: options?.identityFilePath });
-			}
-			return {
-				privosUrl: input.privosUrl,
-				clientId: input.clientId,
-				clientSecret: input.clientSecret,
-				mcpAppId: input.mcpAppId,
-				pairingVersion: 2,
-				trust,
-				fingerprint,
-				...(identityFilePath ? { identityFilePath } : {}),
-			};
+			return persistPairedV2Identity(input, {
+				onFingerprint: options?.onFingerprint,
+				persistIdentityFile,
+				identityFilePath: options?.identityFilePath,
+			});
 		}
 
 		ws.on('open', () => {
@@ -369,6 +349,128 @@ export function pairOverWebSocket(
 			});
 		});
 	});
+}
+
+const DEFAULT_APPROVAL_TIMEOUT_MS = 30 * 60_000;
+
+/** Validate a v2 trust payload, verify the fingerprint, and persist the identity file. */
+async function persistPairedV2Identity(
+	input: { privosUrl: string; clientId: string; clientSecret: string; mcpAppId?: string; trust?: unknown; fingerprint?: string },
+	options: { onFingerprint?: (line: string) => void; persistIdentityFile: boolean; identityFilePath?: string },
+): Promise<PairingResult> {
+	assertRuntimeDispatchTrustConfigurationV3(input.trust);
+	const trust = input.trust;
+	const fingerprint = standaloneHubFingerprint(trust.hubKid);
+	if (input.fingerprint !== undefined && input.fingerprint !== fingerprint) {
+		throw new Error('Pairing response fingerprint does not match the pinned Hub key.');
+	}
+	(options.onFingerprint ?? ((line: string) => console.log(line)))(
+		`PrivOS Hub fingerprint: ${fingerprint} — verify this out-of-band before trusting dispatch from this Hub.`,
+	);
+	let identityFilePath: string | undefined;
+	if (options.persistIdentityFile) {
+		const identity: StandaloneIdentityV2 = {
+			pairingVersion: 2,
+			relayUrl: input.privosUrl,
+			clientId: input.clientId,
+			clientSecret: input.clientSecret,
+			trust,
+			fingerprint,
+			...(input.mcpAppId ? { mcpAppId: input.mcpAppId } : {}),
+			pairedAt: Date.now(),
+		};
+		identityFilePath = await saveStandaloneIdentity(identity, { filePath: options.identityFilePath });
+	}
+	return {
+		privosUrl: input.privosUrl,
+		clientId: input.clientId,
+		clientSecret: input.clientSecret,
+		mcpAppId: input.mcpAppId,
+		pairingVersion: 2,
+		trust,
+		fingerprint,
+		...(identityFilePath ? { identityFilePath } : {}),
+	};
+}
+
+/** Derive the Hub HTTP origin and the `?pair=` token from a `wss://…/mcp-apps.relay?pair=…` URL. */
+function pairPollTarget(pairUrl: string): { origin: string; pairToken: string } {
+	const url = new URL(pairUrl);
+	const pairToken = url.searchParams.get('pair') ?? '';
+	const httpProtocol = url.protocol === 'wss:' ? 'https:' : url.protocol === 'ws:' ? 'http:' : url.protocol;
+	return { origin: `${httpProtocol}//${url.host}`, pairToken };
+}
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * One-command pairing (device-authorization flow). Registers exactly like
+ * {@link pairOverWebSocket}; if the Hub answers `awaitingApproval`, this then
+ * POLLS the Hub with the SAME pairing token until an admin approves the
+ * permission ceiling, receives the pairing-v2 trust payload, and writes the
+ * standalone identity file — no second pairing URL. A Hub that returns trust
+ * immediately (already-approved linked pairing, or a v1 Hub) is passed straight
+ * through. Security is unchanged: nothing usable is returned before approval,
+ * and the out-of-band fingerprint check still fires on first identity write.
+ */
+export async function pairAndAwaitApproval(
+	pairUrl: string,
+	appMeta: PairAppMeta,
+	WebSocketImpl: typeof WebSocket = WebSocket,
+	options?: PairOverWebSocketOptions,
+): Promise<PairingResult> {
+	const registered = await pairOverWebSocket(pairUrl, appMeta, WebSocketImpl, options);
+	// A Hub that already handed trust (linked pairing) or a v1 Hub: nothing to await.
+	if (registered.pairingVersion === 2 || !registered.awaitingApproval) return registered;
+
+	const { origin, pairToken } = pairPollTarget(pairUrl);
+	if (!pairToken) throw new Error('Cannot poll for approval: the pairing URL carries no token.');
+	const fetchImpl = options?.fetchImpl ?? fetch;
+	const persistIdentityFile = options?.persistIdentityFile ?? true;
+	const deadline = Date.now() + (options?.approvalTimeoutMs ?? DEFAULT_APPROVAL_TIMEOUT_MS);
+	let delayMs = options?.pollIntervalMs ?? 2_000;
+
+	for (;;) {
+		const response = await fetchImpl(`${origin}/api/v1/mcp-apps.standalone.pair-poll`, {
+			method: 'POST',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify({ pairToken }),
+		});
+		// Rocket.Chat wraps success as `{ success:true, ...result }`, failure as `{ success:false, error }`.
+		const body = (await response.json().catch(() => ({}))) as {
+			success?: boolean;
+			error?: string;
+			status?: 'pending' | 'approved' | 'rejected' | 'expired';
+			clientId?: string;
+			clientSecret?: string;
+			relayUrl?: string;
+			appId?: string;
+			trust?: unknown;
+			fingerprint?: string;
+		};
+		if (body.success === false) throw new Error(body.error || 'Pairing poll was rejected');
+
+		if (body.status === 'approved') {
+			return persistPairedV2Identity(
+				{
+					privosUrl: body.relayUrl ?? registered.privosUrl,
+					clientId: body.clientId ?? registered.clientId,
+					clientSecret: body.clientSecret ?? registered.clientSecret,
+					mcpAppId: body.appId ?? registered.mcpAppId,
+					trust: body.trust,
+					fingerprint: body.fingerprint,
+				},
+				{ onFingerprint: options?.onFingerprint, persistIdentityFile, identityFilePath: options?.identityFilePath },
+			);
+		}
+		if (body.status === 'rejected') throw new Error('Pairing was rejected — the app was removed. Re-pair from scratch.');
+		if (body.status === 'expired') throw new Error('Pairing token expired before approval — re-run pairing.');
+
+		if (Date.now() >= deadline) throw new Error('Timed out waiting for admin approval of the permission ceiling.');
+		options?.onAwaitingApproval?.();
+		await sleep(delayMs);
+		delayMs = Math.min(Math.round(delayMs * 1.5), 10_000);
+	}
 }
 
 export async function pairFromDescriptor(
