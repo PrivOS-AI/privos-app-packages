@@ -35,13 +35,19 @@ import {
 	type StandaloneRelayIdentityController,
 } from './standalone-control.js';
 import {
+	consumeStandalonePendingIdentity,
+	loadStandaloneIdentity,
+	loadStandalonePendingIdentity,
 	resolveIdentityFilePath,
 	saveStandaloneIdentity,
+	saveStandalonePendingIdentity,
 	standaloneHubFingerprint,
 	standaloneIdentityFileExists,
 	StandaloneIdentityError,
 	type StandaloneIdentityV2,
+	type StandalonePendingIdentityV2,
 } from './standalone-identity.js';
+import { lintManifest, sha256CanonicalJson } from '../manifest-tools.js';
 import {
 	assertRuntimeDispatchTrustConfigurationV3,
 	extractRuntimeDispatchRelayEnvelopeV3,
@@ -59,34 +65,75 @@ export interface PairAppMeta {
 	scopes?: string[];
 	permissions?: AppPermissionDescriptor[];
 	/**
-	 * The app's own `privos-app.json`, announced at pairing so no admin ever
-	 * handles the file. A Hub that accepts it registers a v3 app carrying this
-	 * contract, declared but unapproved: the app holds credentials and no grant
-	 * until an admin approves a ceiling, and no dispatch trust until it pairs
-	 * again against the approved app. Omit it to register a legacy relay app.
+	 * The app's own exact published schema-v3 `privos-app.json`, announced at
+	 * pairing so no admin ever handles the file — sent verbatim, never
+	 * synthesized from metadata. A Hub that accepts it registers a v3 app
+	 * carrying this contract, declared but unapproved: the app holds
+	 * credentials and no grant until an admin approves a ceiling, and no
+	 * dispatch trust until the pairing completes against the approved app.
+	 * Omit it to register a legacy relay app.
 	 */
-	manifest?: unknown;
+	manifest?: Record<string, unknown>;
 }
 
-export interface PairingResult {
+export type PairingResult = LegacyPairingResult | PendingPairingResult | CompletedPairingResult;
+
+export interface LegacyPairingResult {
+	state: 'legacy-complete';
 	privosUrl: string;
 	clientId: string;
 	clientSecret: string;
 	mcpAppId?: string;
-	/** Present only when the Hub replied with pairing payload v2 (Hub dispatch trust bootstrap). */
-	pairingVersion?: 2;
-	trust?: RuntimeDispatchTrustV3;
-	/** `SHA256:<hubKid>` — print/compare out-of-band, SSH-host-key style. */
-	fingerprint?: string;
-	/** Absolute path the standalone identity file was written to, when persisted. */
-	identityFilePath?: string;
+	pairingVersion?: undefined;
+	trust?: undefined;
+	fingerprint?: undefined;
+	identityFilePath?: undefined;
 	/**
-	 * The Hub registered this app from its announced manifest and is waiting for
-	 * an admin to approve a permission ceiling. The credentials above are real,
-	 * but the app is granted nothing and carries no dispatch trust yet — pair
-	 * again once approved to receive it.
+	 * Set when a Hub generation that predates the discriminated pending
+	 * contract acknowledged a manifest-announced registration: credentials are
+	 * real, but the app is granted nothing and carries no dispatch trust until
+	 * an admin approves a ceiling — poll with `pairAndAwaitApproval` or pair
+	 * again once approved.
 	 */
 	awaitingApproval?: boolean;
+}
+
+export interface PendingPairingResult {
+	state: 'pending-approval';
+	privosUrl: string;
+	clientId: string;
+	clientSecret: string;
+	mcpAppId: string;
+	pairingVersion: 2;
+	pairingId: string;
+	oauthClientId: string;
+	manifestDigest: string;
+	permissionContractHash: string;
+	declaredPermissionCeiling: readonly string[];
+	hubKid: string;
+	fingerprint: string;
+	pendingIdentityFilePath?: string;
+	trust?: undefined;
+	identityFilePath?: undefined;
+	/** Always true: this registration awaits an admin-approved permission ceiling. */
+	awaitingApproval: true;
+}
+
+export interface CompletedPairingResult {
+	state: 'complete';
+	privosUrl: string;
+	clientId: string;
+	clientSecret: string;
+	mcpAppId: string;
+	pairingVersion: 2;
+	trust: RuntimeDispatchTrustV3;
+	/** `SHA256:<hubKid>` — print/compare out-of-band, SSH-host-key style. */
+	fingerprint: string;
+	manifestDigest: string;
+	approvedPermissionCeiling?: readonly string[];
+	/** Absolute path the standalone identity file was written to, when persisted. */
+	identityFilePath?: string;
+	awaitingApproval?: undefined;
 }
 
 export interface PairOverWebSocketOptions {
@@ -98,6 +145,8 @@ export interface PairOverWebSocketOptions {
 	persistIdentityFile?: boolean;
 	/** Overrides `PRIVOS_STANDALONE_IDENTITY_FILE` / the SDK default. */
 	identityFilePath?: string;
+	/** Overrides the separate non-dispatchable pending credential file. */
+	pendingIdentityFilePath?: string;
 	/** Receives the fingerprint line for out-of-band operator verification; defaults to `console.log`. */
 	onFingerprint?: (fingerprint: string) => void;
 	/** `fetch` used by `pairAndAwaitApproval` to poll for approval. Defaults to the global. */
@@ -110,10 +159,153 @@ export interface PairOverWebSocketOptions {
 	onAwaitingApproval?: () => void;
 }
 
+export interface ResumeStandalonePairingOptions extends PairOverWebSocketOptions {
+	fetchImpl?: typeof fetch;
+	WebSocketImpl?: typeof WebSocket;
+	oauthTimeoutMs?: number;
+}
+
 const BACKOFF_MS = [1_000, 2_000, 5_000, 10_000, 30_000] as const;
 const DEFAULT_PAIRING_TIMEOUT_MS = 30_000;
 const DEFAULT_OAUTH_TIMEOUT_MS = 15_000;
 const DEFAULT_OPEN_HANDSHAKE_TIMEOUT_MS = 15_000;
+
+type PairingWireResult = {
+	paired?: boolean;
+	pairingState?: 'pending-approval' | 'complete';
+	clientId?: string;
+	clientSecret?: string;
+	relayUrl?: string;
+	mcpAppId?: string;
+	appId?: string;
+	app?: { _id?: string };
+	pairingVersion?: number;
+	trust?: unknown;
+	fingerprint?: string;
+	pairingId?: string;
+	oauthClientId?: string;
+	manifestDigest?: string;
+	permissionContractHash?: string;
+	declaredPermissionCeiling?: unknown;
+	approvedPermissionCeiling?: unknown;
+	hubKid?: string;
+	awaitingApproval?: boolean;
+};
+
+function sortedUniqueStrings(value: unknown, field: string): string[] {
+	if (!Array.isArray(value) || value.some((item) => typeof item !== 'string' || !item)) {
+		throw new Error(`Pairing response ${field} is invalid.`);
+	}
+	const result = [...value].sort();
+	if (new Set(result).size !== result.length) throw new Error(`Pairing response ${field} contains duplicates.`);
+	return result;
+}
+
+function manifestDeclaredPermissionCeiling(manifest: Record<string, unknown>): string[] {
+	if (!Array.isArray(manifest.permissions)) throw new Error('Published v3 manifest must declare permissions.');
+	return sortedUniqueStrings(
+		manifest.permissions.map((permission) =>
+			permission && typeof permission === 'object' && !Array.isArray(permission)
+				? (permission as Record<string, unknown>).scope
+				: undefined,
+		),
+		'manifest permission ceiling',
+	);
+}
+
+async function persistCompletedPairing(input: {
+	wire: PairingWireResult;
+	privosUrl: string;
+	clientId: string;
+	clientSecret: string;
+	mcpAppId: string;
+	options?: PairOverWebSocketOptions;
+	pending?: StandalonePendingIdentityV2;
+}): Promise<CompletedPairingResult> {
+	assertRuntimeDispatchTrustConfigurationV3(input.wire.trust);
+	const trust = input.wire.trust;
+	const fingerprint = standaloneHubFingerprint(trust.hubKid);
+	if (input.wire.fingerprint !== undefined && input.wire.fingerprint !== fingerprint) {
+		throw new Error('Pairing response fingerprint does not match the pinned Hub key.');
+	}
+	if (trust.affinity.mcpAppId !== input.mcpAppId) throw new Error('Pairing completion changed the app identity.');
+	if (input.wire.manifestDigest && input.wire.manifestDigest !== trust.affinity.manifestDigest) {
+		throw new Error('Pairing completion manifest digest does not match dispatch affinity.');
+	}
+	let approvedPermissionCeiling: string[] | undefined;
+	if (input.wire.approvedPermissionCeiling !== undefined) {
+		approvedPermissionCeiling = sortedUniqueStrings(input.wire.approvedPermissionCeiling, 'approvedPermissionCeiling');
+	}
+	if (input.pending) {
+		if (
+			input.pending.clientId !== input.clientId ||
+			input.pending.oauthClientId !== input.wire.oauthClientId ||
+			input.pending.mcpAppId !== input.mcpAppId ||
+			input.pending.pairingId !== input.wire.pairingId ||
+			input.pending.manifestDigest !== trust.affinity.manifestDigest ||
+			input.pending.permissionContractHash !== input.wire.permissionContractHash ||
+			input.pending.hubKid !== trust.hubKid ||
+			input.pending.fingerprint !== fingerprint
+		) {
+			throw new Error('Pairing completion does not match the durable pending identity.');
+		}
+		if (!approvedPermissionCeiling) throw new Error('Pairing completion omitted the approved permission ceiling.');
+		const declared = new Set(input.pending.declaredPermissionCeiling);
+		if (approvedPermissionCeiling.some((scope) => !declared.has(scope))) {
+			throw new Error('Pairing completion widened the published permission ceiling.');
+		}
+	}
+	(input.options?.onFingerprint ?? ((line: string) => console.log(line)))(
+		`PrivOS Hub fingerprint: ${fingerprint} — verify this out-of-band before trusting dispatch from this Hub.`,
+	);
+	let identityFilePath: string | undefined;
+	if (input.options?.persistIdentityFile ?? true) {
+		const identity: StandaloneIdentityV2 = {
+			pairingVersion: 2,
+			relayUrl: input.privosUrl,
+			clientId: input.clientId,
+			clientSecret: input.clientSecret,
+			trust,
+			fingerprint,
+			mcpAppId: input.mcpAppId,
+			pairedAt: Date.now(),
+		};
+		try {
+			identityFilePath = await saveStandaloneIdentity(identity, { filePath: input.options?.identityFilePath });
+		} catch (error) {
+			const existing = loadStandaloneIdentity({ filePath: input.options?.identityFilePath });
+			if (
+				existing.identity.relayUrl !== identity.relayUrl ||
+				existing.identity.clientId !== identity.clientId ||
+				existing.identity.clientSecret !== identity.clientSecret ||
+				existing.identity.mcpAppId !== identity.mcpAppId ||
+				JSON.stringify(existing.identity.trust) !== JSON.stringify(identity.trust)
+			) {
+				throw error;
+			}
+			identityFilePath = existing.filePath;
+		}
+		if (input.pending) {
+			await consumeStandalonePendingIdentity(input.pending, {
+				filePath: input.options?.pendingIdentityFilePath,
+				finalIdentityFilePath: input.options?.identityFilePath,
+			});
+		}
+	}
+	return {
+		state: 'complete',
+		privosUrl: input.privosUrl,
+		clientId: input.clientId,
+		clientSecret: input.clientSecret,
+		mcpAppId: input.mcpAppId,
+		pairingVersion: 2,
+		trust,
+		fingerprint,
+		manifestDigest: trust.affinity.manifestDigest,
+		...(approvedPermissionCeiling ? { approvedPermissionCeiling } : {}),
+		...(identityFilePath ? { identityFilePath } : {}),
+	};
+}
 
 export interface RelayClientOptions {
 	privosUrl: string;
@@ -191,6 +383,13 @@ export interface RelayHandle {
  * create — same discipline as the Hub's own identity file), then prints the
  * Hub fingerprint for out-of-band operator verification. Set
  * `persistIdentityFile: false` to opt out and handle persistence yourself.
+ *
+ * If the socket closes after the Hub has persisted registration but before
+ * this function receives the result, the caller may explicitly invoke this
+ * function again with the same pairing URL and byte-semantically identical
+ * published manifest during the Hub's bounded recovery window. There is no
+ * automatic retry or polling loop: a changed URL, manifest, or authority must
+ * fail at the Hub rather than being hidden by client-side retry behavior.
  */
 export function pairOverWebSocket(
 	pairUrl: string,
@@ -240,36 +439,109 @@ export function pairOverWebSocket(
 		}, timeoutMs);
 
 		async function finishPairing(input: {
+			wire: PairingWireResult;
 			privosUrl: string;
 			clientId: string;
 			clientSecret: string;
 			mcpAppId?: string;
-			pairingVersion?: number;
-			trust?: unknown;
-			fingerprint?: string;
-			awaitingApproval?: boolean;
 		}): Promise<PairingResult> {
-			if (input.pairingVersion !== 2) {
-				// Either a v1 Hub, or a manifest-announced registration still awaiting
-				// approval: both hand back credentials and nothing to persist, because
+			if (input.wire.pairingVersion !== 2) {
+				// Either a v1 Hub, or a Hub generation that acknowledges a
+				// manifest-announced registration with only `awaitingApproval`:
+				// both hand back credentials and nothing to persist, because
 				// trust is minted with the generation an approved ceiling creates.
 				return {
+					state: 'legacy-complete',
 					privosUrl: input.privosUrl,
 					clientId: input.clientId,
 					clientSecret: input.clientSecret,
 					mcpAppId: input.mcpAppId,
-					...(input.awaitingApproval ? { awaitingApproval: true } : {}),
+					...(input.wire.awaitingApproval ? { awaitingApproval: true } : {}),
 				};
 			}
-			return persistPairedV2Identity(input, {
-				onFingerprint: options?.onFingerprint,
-				persistIdentityFile,
-				identityFilePath: options?.identityFilePath,
+			if (!input.mcpAppId) throw new Error('Pairing v2 response missing app identity.');
+			if (input.wire.pairingState === 'pending-approval') {
+				if (!appMeta.manifest) throw new Error('Pending manifest pairing response was not requested with an exact manifest.');
+				const declaredPermissionCeiling = sortedUniqueStrings(
+					input.wire.declaredPermissionCeiling,
+					'declaredPermissionCeiling',
+				);
+				const localDeclaredPermissionCeiling = manifestDeclaredPermissionCeiling(appMeta.manifest);
+				const manifestDigest = sha256CanonicalJson(appMeta.manifest);
+				if (
+					input.wire.manifestDigest !== manifestDigest ||
+					JSON.stringify(declaredPermissionCeiling) !== JSON.stringify(localDeclaredPermissionCeiling) ||
+					!input.wire.pairingId ||
+					!input.wire.oauthClientId ||
+					input.wire.oauthClientId !== input.clientId ||
+					!input.wire.permissionContractHash ||
+					!input.wire.hubKid
+				) {
+					throw new Error('Pending pairing response does not match the exact published manifest or OAuth identity.');
+				}
+				const fingerprint = standaloneHubFingerprint(input.wire.hubKid);
+				if (input.wire.fingerprint !== fingerprint) throw new Error('Pending pairing Hub fingerprint is invalid.');
+				(options?.onFingerprint ?? ((line: string) => console.log(line)))(
+					`PrivOS Hub fingerprint: ${fingerprint} — verify this out-of-band before approving this app.`,
+				);
+				const pending: StandalonePendingIdentityV2 = {
+					pairingVersion: 2,
+					state: 'pending-approval',
+					relayUrl: input.privosUrl,
+					clientId: input.clientId,
+					clientSecret: input.clientSecret,
+					mcpAppId: input.mcpAppId,
+					pairingId: input.wire.pairingId,
+					oauthClientId: input.wire.oauthClientId,
+					manifestDigest,
+					permissionContractHash: input.wire.permissionContractHash,
+					declaredPermissionCeiling,
+					hubKid: input.wire.hubKid,
+					fingerprint,
+					createdAt: Date.now(),
+				};
+				const pendingIdentityFilePath = persistIdentityFile
+					? await saveStandalonePendingIdentity(pending, {
+							filePath: options?.pendingIdentityFilePath,
+							finalIdentityFilePath: options?.identityFilePath,
+						})
+					: undefined;
+				return {
+					state: 'pending-approval',
+					privosUrl: input.privosUrl,
+					clientId: input.clientId,
+					clientSecret: input.clientSecret,
+					mcpAppId: input.mcpAppId,
+					pairingVersion: 2,
+					pairingId: pending.pairingId,
+					oauthClientId: pending.oauthClientId,
+					manifestDigest,
+					permissionContractHash: pending.permissionContractHash,
+					declaredPermissionCeiling,
+					hubKid: pending.hubKid,
+					fingerprint,
+					awaitingApproval: true,
+					...(pendingIdentityFilePath ? { pendingIdentityFilePath } : {}),
+				};
+			}
+			return persistCompletedPairing({
+				wire: input.wire,
+				privosUrl: input.privosUrl,
+				clientId: input.clientId,
+				clientSecret: input.clientSecret,
+				mcpAppId: input.mcpAppId,
+				options,
 			});
 		}
 
 		ws.on('open', () => {
 			try {
+				if (appMeta.manifest) {
+					const lint = lintManifest(appMeta.manifest);
+					if (appMeta.manifest.schemaVersion !== 3 || !lint.valid) {
+						throw new Error(`Exact standalone manifest is not a valid schema-v3 manifest: ${lint.errors.join('; ')}`);
+					}
+				}
 				ws.send(
 					JSON.stringify({
 						name: appMeta.name,
@@ -278,7 +550,7 @@ export function pairOverWebSocket(
 						...(appMeta.icon && { icon: appMeta.icon }),
 						...(appMeta.scopes?.length && { scopes: appMeta.scopes }),
 						...(appMeta.permissions?.length && { permissions: appMeta.permissions }),
-						...(appMeta.manifest !== undefined && { manifest: appMeta.manifest }),
+						...(appMeta.manifest ? { manifest: appMeta.manifest } : {}),
 					}),
 				);
 			} catch (err) {
@@ -292,26 +564,14 @@ export function pairOverWebSocket(
 			try {
 				const msg = JSON.parse(rawDataToText(raw)) as {
 					error?: { message?: string };
-					result?: {
-						paired?: boolean;
-						clientId?: string;
-						clientSecret?: string;
-						relayUrl?: string;
-						mcpAppId?: string;
-						appId?: string;
-						app?: { _id?: string };
-						pairingVersion?: number;
-						trust?: unknown;
-						fingerprint?: string;
-						awaitingApproval?: boolean;
-					};
+					result?: PairingWireResult;
 				};
 				if (msg.error) {
 					settle(() => reject(new Error(msg.error?.message || 'Pairing failed')));
 					return;
 				}
-				if (msg.result?.paired) {
-					const { clientId, clientSecret, relayUrl, app, mcpAppId, appId, pairingVersion, trust, fingerprint, awaitingApproval } =
+				if (msg.result && (msg.result.paired || msg.result.pairingState === 'pending-approval')) {
+					const { clientId, clientSecret, relayUrl, app, mcpAppId, appId } =
 						msg.result;
 					if (!clientId || !clientSecret || !relayUrl) {
 						settle(() => reject(new Error('Pairing response missing credentials')));
@@ -326,14 +586,11 @@ export function pairOverWebSocket(
 
 					settle(() => {
 						void finishPairing({
+							wire: msg.result!,
 							privosUrl,
 							clientId,
 							clientSecret,
 							mcpAppId: resolvedAppId,
-							pairingVersion,
-							trust,
-							fingerprint,
-							awaitingApproval: awaitingApproval === true,
 						})
 							.then(resolve)
 							.catch(reject);
@@ -370,46 +627,6 @@ export function pairOverWebSocket(
 
 const DEFAULT_APPROVAL_TIMEOUT_MS = 30 * 60_000;
 
-/** Validate a v2 trust payload, verify the fingerprint, and persist the identity file. */
-async function persistPairedV2Identity(
-	input: { privosUrl: string; clientId: string; clientSecret: string; mcpAppId?: string; trust?: unknown; fingerprint?: string },
-	options: { onFingerprint?: (line: string) => void; persistIdentityFile: boolean; identityFilePath?: string },
-): Promise<PairingResult> {
-	assertRuntimeDispatchTrustConfigurationV3(input.trust);
-	const trust = input.trust;
-	const fingerprint = standaloneHubFingerprint(trust.hubKid);
-	if (input.fingerprint !== undefined && input.fingerprint !== fingerprint) {
-		throw new Error('Pairing response fingerprint does not match the pinned Hub key.');
-	}
-	(options.onFingerprint ?? ((line: string) => console.log(line)))(
-		`PrivOS Hub fingerprint: ${fingerprint} — verify this out-of-band before trusting dispatch from this Hub.`,
-	);
-	let identityFilePath: string | undefined;
-	if (options.persistIdentityFile) {
-		const identity: StandaloneIdentityV2 = {
-			pairingVersion: 2,
-			relayUrl: input.privosUrl,
-			clientId: input.clientId,
-			clientSecret: input.clientSecret,
-			trust,
-			fingerprint,
-			...(input.mcpAppId ? { mcpAppId: input.mcpAppId } : {}),
-			pairedAt: Date.now(),
-		};
-		identityFilePath = await saveStandaloneIdentity(identity, { filePath: options.identityFilePath });
-	}
-	return {
-		privosUrl: input.privosUrl,
-		clientId: input.clientId,
-		clientSecret: input.clientSecret,
-		mcpAppId: input.mcpAppId,
-		pairingVersion: 2,
-		trust,
-		fingerprint,
-		...(identityFilePath ? { identityFilePath } : {}),
-	};
-}
-
 /**
  * Normalize a Hub-supplied relay URL (`wss://host/api/v1/mcp-apps.relay`) to the
  * bare Hub HTTP origin the identity file stores as `relayUrl`/`privosUrl`. serveApp
@@ -433,8 +650,9 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
 
 /**
  * One-command pairing (device-authorization flow). Registers exactly like
- * {@link pairOverWebSocket}; if the Hub answers `awaitingApproval`, this then
- * POLLS the Hub with the SAME pairing token until an admin approves the
+ * {@link pairOverWebSocket}; while the registration awaits an admin's approval
+ * (`pending-approval` state, or a legacy-shaped `awaitingApproval` response),
+ * this POLLS the Hub with the SAME pairing token until the admin approves the
  * permission ceiling, receives the pairing-v2 trust payload, and writes the
  * standalone identity file — no second pairing URL. A Hub that returns trust
  * immediately (already-approved linked pairing, or a v1 Hub) is passed straight
@@ -448,8 +666,8 @@ export async function pairAndAwaitApproval(
 	options?: PairOverWebSocketOptions,
 ): Promise<PairingResult> {
 	const registered = await pairOverWebSocket(pairUrl, appMeta, WebSocketImpl, options);
-	// A Hub that already handed trust (linked pairing) or a v1 Hub: nothing to await.
-	if (registered.pairingVersion === 2 || !registered.awaitingApproval) return registered;
+	// Trust already delivered (linked pairing), or a v1 Hub with nothing pending: done.
+	if (registered.state === 'complete' || !registered.awaitingApproval) return registered;
 
 	const { origin, pairToken } = pairPollTarget(pairUrl);
 	if (!pairToken) throw new Error('Cannot poll for approval: the pairing URL carries no token.');
@@ -479,17 +697,34 @@ export async function pairAndAwaitApproval(
 		if (body.success === false) throw new Error(body.error || 'Pairing poll was rejected');
 
 		if (body.status === 'approved') {
-			return persistPairedV2Identity(
-				{
-					privosUrl: body.relayUrl ? relayUrlToPrivosOrigin(body.relayUrl) : registered.privosUrl,
-					clientId: body.clientId ?? registered.clientId,
-					clientSecret: body.clientSecret ?? registered.clientSecret,
-					mcpAppId: body.appId ?? registered.mcpAppId,
-					trust: body.trust,
-					fingerprint: body.fingerprint,
-				},
-				{ onFingerprint: options?.onFingerprint, persistIdentityFile, identityFilePath: options?.identityFilePath },
-			);
+			const mcpAppId = body.appId ?? registered.mcpAppId;
+			if (!mcpAppId) throw new Error('Pairing approval response missing app identity.');
+			const completed = await persistCompletedPairing({
+				wire: { trust: body.trust, fingerprint: body.fingerprint },
+				privosUrl: body.relayUrl ? relayUrlToPrivosOrigin(body.relayUrl) : registered.privosUrl,
+				clientId: body.clientId ?? registered.clientId,
+				clientSecret: body.clientSecret ?? registered.clientSecret,
+				mcpAppId,
+				options,
+			});
+			// The pair-poll response carries no pending-contract echo to cross-check,
+			// so the durable pending half is consumed only after trust verification
+			// above — best-effort, the completed identity file is authoritative.
+			if (registered.state === 'pending-approval' && persistIdentityFile) {
+				try {
+					const stalePending = loadStandalonePendingIdentity({
+						filePath: options?.pendingIdentityFilePath,
+						finalIdentityFilePath: options?.identityFilePath,
+					});
+					await consumeStandalonePendingIdentity(stalePending.identity, {
+						filePath: options?.pendingIdentityFilePath,
+						finalIdentityFilePath: options?.identityFilePath,
+					});
+				} catch {
+					/* pending file already gone — nothing left to consume */
+				}
+			}
+			return completed;
 		}
 		if (body.status === 'rejected') throw new Error('Pairing was rejected — the app was removed. Re-pair from scratch.');
 		if (body.status === 'expired') throw new Error('Pairing token expired before approval — re-run pairing.');
@@ -499,6 +734,117 @@ export async function pairAndAwaitApproval(
 		await sleep(delayMs);
 		delayMs = Math.min(Math.round(delayMs * 1.5), 10_000);
 	}
+}
+
+/**
+ * Explicitly resumes one durable app-announced-manifest pairing. This is a
+ * single operator/app action, not a polling loop: a pending Hub replies
+ * pending; an approved Hub returns trust for the same OAuth/app/pairing
+ * identity and the SDK atomically promotes it to the production identity.
+ */
+export async function resumeStandalonePairing(options?: ResumeStandalonePairingOptions): Promise<PendingPairingResult | CompletedPairingResult> {
+	const loaded = loadStandalonePendingIdentity({
+		filePath: options?.pendingIdentityFilePath,
+		finalIdentityFilePath: options?.identityFilePath,
+	});
+	const pending = loaded.identity;
+	const fetchImpl = options?.fetchImpl ?? fetch;
+	const WebSocketImpl = options?.WebSocketImpl ?? WebSocket;
+	const controller = new AbortController();
+	const oauthTimer = setTimeout(() => controller.abort(), options?.oauthTimeoutMs ?? DEFAULT_OAUTH_TIMEOUT_MS);
+	let accessToken: string;
+	try {
+		const response = await fetchImpl(`${pending.relayUrl}/oauth/token`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+			body: `grant_type=client_credentials&client_id=${encodeURIComponent(pending.clientId)}&client_secret=${encodeURIComponent(pending.clientSecret)}`,
+			signal: controller.signal,
+		});
+		if (!response.ok) throw new Error(`Pairing completion OAuth failed: ${response.status} ${response.statusText}`);
+		const token = (await response.json()) as { access_token?: string };
+		if (!token.access_token) throw new Error('Pairing completion OAuth response omitted access_token.');
+		accessToken = token.access_token;
+	} finally {
+		clearTimeout(oauthTimer);
+	}
+
+	const timeoutMs = options?.timeoutMs ?? DEFAULT_PAIRING_TIMEOUT_MS;
+	const wire = await new Promise<PairingWireResult>((resolve, reject) => {
+		const wsUrl = `${pending.relayUrl.replace(/^http/, 'ws')}/api/v1/mcp-apps.relay?pairingCompletion=1`;
+		const ws = new WebSocketImpl(wsUrl, { headers: { Authorization: `Bearer ${accessToken}` } });
+		let settled = false;
+		const settle = (fn: () => void) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			fn();
+		};
+		const timer = setTimeout(() => {
+			settle(() => reject(new Error(`Pairing completion timed out after ${timeoutMs}ms`)));
+			try { ws.close(); } catch { /* ignore */ }
+		}, timeoutMs);
+		ws.on('message', (raw: RawData) => {
+			try {
+				const message = JSON.parse(rawDataToText(raw)) as { result?: PairingWireResult; error?: { message?: string } };
+				if (message.error) return settle(() => reject(new Error(message.error?.message || 'Pairing completion failed')));
+				if (message.result?.pairingVersion !== 2) return settle(() => reject(new Error('Pairing completion response is not protocol v2.')));
+				settle(() => resolve(message.result!));
+				try { ws.close(); } catch { /* ignore */ }
+			} catch (error) {
+				settle(() => reject(error instanceof Error ? error : new Error(String(error))));
+			}
+		});
+		ws.on('error', (error) => settle(() => reject(new Error(`Pairing completion failed: ${error.message}`))));
+		ws.on('close', (code, reason) => settle(() => reject(new Error(`Pairing completion closed: ${code} ${reason}`))));
+	});
+
+	if (
+		wire.clientId !== pending.clientId ||
+		wire.oauthClientId !== pending.oauthClientId ||
+		wire.appId !== pending.mcpAppId ||
+		wire.pairingId !== pending.pairingId ||
+		wire.manifestDigest !== pending.manifestDigest ||
+		wire.permissionContractHash !== pending.permissionContractHash ||
+		wire.hubKid !== pending.hubKid ||
+		wire.fingerprint !== pending.fingerprint
+	) {
+		throw new Error('Pairing resume response does not match the durable pending identity.');
+	}
+	if (wire.pairingState === 'pending-approval') {
+		const declaredPermissionCeiling = sortedUniqueStrings(wire.declaredPermissionCeiling, 'declaredPermissionCeiling');
+		if (JSON.stringify(declaredPermissionCeiling) !== JSON.stringify(pending.declaredPermissionCeiling)) {
+			throw new Error('Pairing resume changed the declared permission ceiling.');
+		}
+		return {
+			state: 'pending-approval',
+			privosUrl: pending.relayUrl,
+			clientId: pending.clientId,
+			clientSecret: pending.clientSecret,
+			mcpAppId: pending.mcpAppId,
+			pairingVersion: 2,
+			pairingId: pending.pairingId,
+			oauthClientId: pending.oauthClientId,
+			manifestDigest: pending.manifestDigest,
+			permissionContractHash: pending.permissionContractHash,
+			declaredPermissionCeiling: pending.declaredPermissionCeiling,
+			hubKid: pending.hubKid,
+			fingerprint: pending.fingerprint,
+			awaitingApproval: true,
+			pendingIdentityFilePath: loaded.filePath,
+		};
+	}
+	if (wire.pairingState !== 'complete' || !wire.clientSecret || wire.clientSecret !== pending.clientSecret) {
+		throw new Error('Pairing resume did not return an exact completed identity.');
+	}
+	return persistCompletedPairing({
+		wire,
+		privosUrl: pending.relayUrl,
+		clientId: pending.clientId,
+		clientSecret: pending.clientSecret,
+		mcpAppId: pending.mcpAppId,
+		options,
+		pending,
+	});
 }
 
 export async function pairFromDescriptor(

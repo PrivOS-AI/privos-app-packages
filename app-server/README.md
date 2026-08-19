@@ -367,18 +367,44 @@ a one-time Relay WebSocket URL and run in production against a paired, persisted
 identity — no secret ever lives in a world-readable `.env`.
 
 ```ts
-import { pairOverWebSocket } from '@privos_ai/app-server';
+import { pairOverWebSocket, resumeStandalonePairing } from '@privos_ai/app-server';
 
 // Prints the Hub fingerprint (SSH-host-key style) and, by default, persists
 // ./privos-standalone-identity.json at mode 0600 (override with
 // PRIVOS_STANDALONE_IDENTITY_FILE).
-await pairOverWebSocket(pairingUrl, { name: 'My App', version: '1.0.0' });
+const pairing = await pairOverWebSocket(pairingUrl, {
+  name: publisherManifest.title,
+  version: publisherManifest.version,
+  manifest: publisherManifest, // the exact published schema-v3 document
+});
+
+if (pairing.state === 'pending-approval') {
+  // Run once after the Hub owner approves. This works after process restart:
+  // the pending OAuth/app/manifest binding is stored separately at mode 0600.
+  const completed = await resumeStandalonePairing();
+  if (completed.state !== 'complete') throw new Error('Still awaiting approval');
+}
 ```
 
-A Hub that replies with pairing payload v2 (`pairingVersion: 2`) additionally
-delivers Hub dispatch trust (`hubKid`, `hubPublicJwk`, affinity) and a pinned
-manifest digest; a v1 Hub pairs exactly as before (nothing persisted). Load the
-identity and run the app with `resolveRuntimeMode()` picking the transport:
+If the initial socket closes after the Hub durably registers the app but before
+the result reaches this process, call `pairOverWebSocket` again explicitly with
+the **same pairing URL and exact published manifest**. A compatible Hub recovers
+the already-persisted app, pairing, OAuth client, client secret, manifest,
+permission contract, declared ceiling, and Hub-key identity for up to 24 hours;
+it never creates or rotates another credential. The SDK deliberately does not
+retry or poll on its own. A changed URL, manifest, app identity, creator,
+permission contract, OAuth binding, ceiling, or Hub key fails closed.
+
+A Hub that replies with pairing payload v2 (`pairingVersion: 2`) uses a
+discriminated `pending-approval` / `complete` contract. Pending state persists
+the exact app id, OAuth client, pairing id, manifest digest, permission-contract
+hash, declared ceiling, and Hub fingerprint in a separate owner-only file, but
+contains no dispatch trust and can never satisfy production readiness. Approval
+activates that same OAuth/app identity; `resumeStandalonePairing()` verifies all
+affinities, the approved ceiling, and Hub trust before atomically writing the
+final identity and consuming the pending file. A v1 Hub returns
+`state: 'legacy-complete'` and remains non-persistent. Load the final identity
+and run the app with `resolveRuntimeMode()` picking the transport:
 
 ```ts
 import {

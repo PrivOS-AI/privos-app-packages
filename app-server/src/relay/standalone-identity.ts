@@ -20,6 +20,7 @@ import {
 } from '../workload/dispatch-assertion.js';
 
 export const DEFAULT_STANDALONE_IDENTITY_FILE = './privos-standalone-identity.json';
+export const DEFAULT_STANDALONE_PENDING_IDENTITY_FILE = './privos-standalone-identity.pending.json';
 
 const IDENTITY_REQUIRED_KEYS = [
 	'pairingVersion',
@@ -31,6 +32,22 @@ const IDENTITY_REQUIRED_KEYS = [
 	'pairedAt',
 ] as const;
 const IDENTITY_OPTIONAL_KEYS = ['mcpAppId', 'rotatedAt', 'agentBotCredential'] as const;
+const PENDING_IDENTITY_REQUIRED_KEYS = [
+	'pairingVersion',
+	'state',
+	'relayUrl',
+	'clientId',
+	'clientSecret',
+	'mcpAppId',
+	'pairingId',
+	'oauthClientId',
+	'manifestDigest',
+	'permissionContractHash',
+	'declaredPermissionCeiling',
+	'hubKid',
+	'fingerprint',
+	'createdAt',
+] as const;
 
 export type StandaloneIdentityV2 = Readonly<{
 	pairingVersion: 2;
@@ -53,6 +70,34 @@ export type StandaloneIdentityV2 = Readonly<{
 	 * never logged. Absent until Hub delivers it.
 	 */
 	agentBotCredential?: Readonly<{ botUserId: string; token: string }>;
+}>;
+
+/**
+ * Durable, deliberately non-dispatchable half of app-announced-manifest
+ * pairing. It contains the one OAuth identity the Hub will later activate,
+ * but no dispatch trust. Runtime-mode/readiness code never considers this
+ * file a standalone production identity.
+ */
+export type StandalonePendingIdentityV2 = Readonly<{
+	pairingVersion: 2;
+	state: 'pending-approval';
+	relayUrl: string;
+	clientId: string;
+	clientSecret: string;
+	mcpAppId: string;
+	pairingId: string;
+	oauthClientId: string;
+	manifestDigest: string;
+	permissionContractHash: string;
+	declaredPermissionCeiling: readonly string[];
+	hubKid: string;
+	fingerprint: string;
+	createdAt: number;
+}>;
+
+export type LoadedStandalonePendingIdentity = Readonly<{
+	filePath: string;
+	identity: StandalonePendingIdentityV2;
 }>;
 
 export type LoadedStandaloneIdentity = Readonly<{
@@ -98,6 +143,16 @@ export function standaloneHubFingerprint(hubKid: string): string {
 
 export function resolveIdentityFilePath(explicit?: string): string {
 	return path.resolve(explicit ?? process.env.PRIVOS_STANDALONE_IDENTITY_FILE ?? DEFAULT_STANDALONE_IDENTITY_FILE);
+}
+
+/** Resolves the pending file independently so it can never satisfy production readiness. */
+export function resolveStandalonePendingIdentityFilePath(explicit?: string, finalIdentityFilePath?: string): string {
+	if (explicit) return path.resolve(explicit);
+	if (process.env.PRIVOS_STANDALONE_PENDING_IDENTITY_FILE) return path.resolve(process.env.PRIVOS_STANDALONE_PENDING_IDENTITY_FILE);
+	if (finalIdentityFilePath || process.env.PRIVOS_STANDALONE_IDENTITY_FILE) {
+		return `${resolveIdentityFilePath(finalIdentityFilePath)}.pending`;
+	}
+	return path.resolve(DEFAULT_STANDALONE_PENDING_IDENTITY_FILE);
 }
 
 /** Throws {@link StandaloneIdentityError} `IDENTITY_FILE_INVALID` describing exactly what failed. */
@@ -153,6 +208,46 @@ export function assertStandaloneIdentityShape(value: unknown): asserts value is 
 	}
 }
 
+export function assertStandalonePendingIdentityShape(value: unknown): asserts value is StandalonePendingIdentityV2 {
+	if (!isRecord(value) || !exactKeys(value, PENDING_IDENTITY_REQUIRED_KEYS, [])) {
+		throw new StandaloneIdentityError('IDENTITY_FILE_INVALID', 'Standalone pending identity file has an unexpected shape.');
+	}
+	const declaredPermissionCeiling = Array.isArray(value.declaredPermissionCeiling) ? value.declaredPermissionCeiling : [];
+	if (
+		value.pairingVersion !== 2 ||
+		value.state !== 'pending-approval' ||
+		typeof value.relayUrl !== 'string' ||
+		!value.relayUrl ||
+		typeof value.clientId !== 'string' ||
+		!value.clientId ||
+		typeof value.clientSecret !== 'string' ||
+		!value.clientSecret ||
+		typeof value.mcpAppId !== 'string' ||
+		!value.mcpAppId ||
+		typeof value.pairingId !== 'string' ||
+		!value.pairingId ||
+		typeof value.oauthClientId !== 'string' ||
+		value.oauthClientId !== value.clientId ||
+		!/^sha256:[a-f0-9]{64}$/.test(String(value.manifestDigest)) ||
+		!/^[A-Za-z0-9_-]{43}$/.test(String(value.permissionContractHash)) ||
+		!Array.isArray(value.declaredPermissionCeiling) ||
+		declaredPermissionCeiling.some((scope) => typeof scope !== 'string' || !scope) ||
+		new Set(declaredPermissionCeiling).size !== declaredPermissionCeiling.length ||
+		[...declaredPermissionCeiling].sort().some((scope, index) => scope !== declaredPermissionCeiling[index]) ||
+		typeof value.hubKid !== 'string' ||
+		!value.hubKid ||
+		value.fingerprint !== standaloneHubFingerprint(value.hubKid) ||
+		!Number.isFinite(value.createdAt)
+	) {
+		throw new StandaloneIdentityError('IDENTITY_FILE_INVALID', 'Standalone pending identity file has an invalid field.');
+	}
+	try {
+		new URL(value.relayUrl);
+	} catch {
+		throw new StandaloneIdentityError('IDENTITY_FILE_INVALID', 'Standalone pending identity relayUrl is not a valid URL.');
+	}
+}
+
 function assertSafeFileStat(stat: fsSync.Stats, filePath: string): void {
 	const uid = typeof process.getuid === 'function' ? process.getuid() : stat.uid;
 	const gid = typeof process.getgid === 'function' ? process.getgid() : stat.gid;
@@ -205,6 +300,28 @@ export function loadStandaloneIdentity(options?: { filePath?: string }): LoadedS
 	});
 }
 
+export function loadStandalonePendingIdentity(options?: {
+	filePath?: string;
+	finalIdentityFilePath?: string;
+}): LoadedStandalonePendingIdentity {
+	const filePath = resolveStandalonePendingIdentityFilePath(options?.filePath, options?.finalIdentityFilePath);
+	let stat: fsSync.Stats;
+	try {
+		stat = fsSync.lstatSync(filePath);
+	} catch {
+		throw new StandaloneIdentityError('IDENTITY_FILE_MISSING', `No standalone pending identity file at ${filePath}.`);
+	}
+	assertSafeFileStat(stat, filePath);
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(fsSync.readFileSync(filePath, 'utf8')) as unknown;
+	} catch {
+		throw new StandaloneIdentityError('IDENTITY_FILE_UNPARSEABLE', `Standalone pending identity file ${filePath} is not valid JSON.`);
+	}
+	assertStandalonePendingIdentityShape(parsed);
+	return Object.freeze({ filePath, identity: parsed });
+}
+
 /** True when a standalone identity file exists at the resolved path, without loading/validating it. */
 export function standaloneIdentityFileExists(options?: { filePath?: string }): boolean {
 	return fsSync.existsSync(resolveIdentityFilePath(options?.filePath));
@@ -246,6 +363,48 @@ export async function saveStandaloneIdentity(
 		await handle.close();
 	}
 	return filePath;
+}
+
+export async function saveStandalonePendingIdentity(
+	identity: StandalonePendingIdentityV2,
+	options?: { filePath?: string; finalIdentityFilePath?: string },
+): Promise<string> {
+	assertStandalonePendingIdentityShape(identity);
+	const filePath = resolveStandalonePendingIdentityFilePath(options?.filePath, options?.finalIdentityFilePath);
+	await assertSafeParentDirectory(path.dirname(filePath));
+	let handle: fs.FileHandle;
+	try {
+		handle = await fs.open(filePath, 'wx', 0o600);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+			const existing = loadStandalonePendingIdentity({ filePath }).identity;
+			if (JSON.stringify(existing) === JSON.stringify(identity)) return filePath;
+			throw new StandaloneIdentityError(
+				'IDENTITY_FILE_ALREADY_EXISTS',
+				`Standalone pending identity file ${filePath} already exists with a different pairing binding.`,
+			);
+		}
+		throw error;
+	}
+	try {
+		await handle.writeFile(`${JSON.stringify(identity, null, 2)}\n`, 'utf8');
+		await handle.sync();
+	} finally {
+		await handle.close();
+	}
+	return filePath;
+}
+
+/** Removes only an exact, already-consumed pending identity after final identity persistence. */
+export async function consumeStandalonePendingIdentity(
+	expected: StandalonePendingIdentityV2,
+	options?: { filePath?: string; finalIdentityFilePath?: string },
+): Promise<void> {
+	const loaded = loadStandalonePendingIdentity(options);
+	if (JSON.stringify(loaded.identity) !== JSON.stringify(expected)) {
+		throw new StandaloneIdentityError('IDENTITY_FILE_INVALID', 'Pending identity changed while pairing completion was being persisted.');
+	}
+	await fs.unlink(loaded.filePath);
 }
 
 /**

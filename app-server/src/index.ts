@@ -106,13 +106,18 @@ export type {
 export {
 	pairOverWebSocket,
 	pairAndAwaitApproval,
+	resumeStandalonePairing,
 	pairFromDescriptor,
 	connectRelay,
 } from './relay/relay-client.js';
 export type {
 	PairAppMeta,
 	PairingResult,
+	LegacyPairingResult,
+	PendingPairingResult,
+	CompletedPairingResult,
 	PairOverWebSocketOptions,
+	ResumeStandalonePairingOptions,
 	RelayClientOptions,
 	RelayHandle,
 } from './relay/relay-client.js';
@@ -127,17 +132,25 @@ export type { HubUserTokenAuthOptions } from './relay/hub-user-token-actor.js';
 
 export {
 	DEFAULT_STANDALONE_IDENTITY_FILE,
+	DEFAULT_STANDALONE_PENDING_IDENTITY_FILE,
 	StandaloneIdentityError,
 	loadStandaloneIdentity,
+	loadStandalonePendingIdentity,
 	saveStandaloneIdentity,
+	saveStandalonePendingIdentity,
+	consumeStandalonePendingIdentity,
 	rotateStandaloneIdentity,
 	standaloneIdentityFileExists,
 	standaloneHubFingerprint,
 	assertStandaloneIdentityShape,
+	assertStandalonePendingIdentityShape,
+	resolveStandalonePendingIdentityFilePath,
 } from './relay/standalone-identity.js';
 export type {
 	StandaloneIdentityV2,
+	StandalonePendingIdentityV2,
 	LoadedStandaloneIdentity,
+	LoadedStandalonePendingIdentity,
 	StandaloneIdentityErrorCode,
 } from './relay/standalone-identity.js';
 export {

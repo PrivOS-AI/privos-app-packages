@@ -35,6 +35,27 @@ function buildTrust(): RuntimeDispatchTrustV3 {
 	};
 }
 
+/** Minimal manifest that passes the client-side schema-v3 lint gate before registration. */
+const TEST_MANIFEST = {
+	schemaVersion: 3,
+	kind: 'mcp-app',
+	name: 'com.example.app',
+	version: '1.0.0',
+	title: 'App',
+	description: 'Test app contract.',
+	permissions: [
+		{
+			scope: 'basic:information',
+			requirement: 'required',
+			context: 'workspace',
+			executionContext: 'both',
+			feature: 'app.core',
+			reason: 'Identify the installation.',
+		},
+	],
+	resourceManifestTemplate: [],
+};
+
 /** WS that answers the register handshake with `awaitingApproval`, then closes. */
 class RegisterThenAwaitWs extends EventEmitter {
 	static OPEN = 1;
@@ -116,7 +137,7 @@ describe('pairAndAwaitApproval', () => {
 
 		const result = await pairAndAwaitApproval(
 			PAIR_URL,
-			{ name: 'App', version: '1.0.0', manifest: {} },
+			{ name: 'App', version: '1.0.0', manifest: TEST_MANIFEST },
 			RegisterThenAwaitWs as never,
 			{ fetchImpl, identityFilePath: identityFile, approvalTimeoutMs: 30_000, pollIntervalMs: 5, onFingerprint: () => {} },
 		);
@@ -136,7 +157,7 @@ describe('pairAndAwaitApproval', () => {
 	it('throws when the Hub rejects the pairing (app removed)', async () => {
 		const fetchImpl = (async () => new Response(JSON.stringify({ success: true, status: 'rejected' }), { status: 200 })) as typeof fetch;
 		await expect(
-			pairAndAwaitApproval(PAIR_URL, { name: 'App', version: '1.0.0', manifest: {} }, RegisterThenAwaitWs as never, {
+			pairAndAwaitApproval(PAIR_URL, { name: 'App', version: '1.0.0', manifest: TEST_MANIFEST }, RegisterThenAwaitWs as never, {
 				fetchImpl,
 				identityFilePath: identityFile,
 			}),
@@ -146,7 +167,7 @@ describe('pairAndAwaitApproval', () => {
 	it('throws when the pairing token expires before approval', async () => {
 		const fetchImpl = (async () => new Response(JSON.stringify({ success: true, status: 'expired' }), { status: 200 })) as typeof fetch;
 		await expect(
-			pairAndAwaitApproval(PAIR_URL, { name: 'App', version: '1.0.0', manifest: {} }, RegisterThenAwaitWs as never, {
+			pairAndAwaitApproval(PAIR_URL, { name: 'App', version: '1.0.0', manifest: TEST_MANIFEST }, RegisterThenAwaitWs as never, {
 				fetchImpl,
 				identityFilePath: identityFile,
 			}),
@@ -163,7 +184,7 @@ describe('pairAndAwaitApproval', () => {
 			return new Response('{}', { status: 200 });
 		}) as typeof fetch;
 		await expect(
-			pairAndAwaitApproval(PAIR_URL, { name: 'App', version: '1.0.0', manifest: {} }, RegisterThenAwaitWs as never, {
+			pairAndAwaitApproval(PAIR_URL, { name: 'App', version: '1.0.0', manifest: TEST_MANIFEST }, RegisterThenAwaitWs as never, {
 				fetchImpl,
 				identityFilePath: identityFile,
 			}),
