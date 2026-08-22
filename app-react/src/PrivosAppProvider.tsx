@@ -57,6 +57,16 @@ export interface UploadFileParams {
 	duplicateAction?: 'replace' | 'keep_both' | 'cancel';
 }
 
+/** Host-mediated, per-app persistent key/value store (see `McpApp.storage`). */
+export interface AppStorage {
+	/** The stored string for `key`, or `null` if never set. */
+	get(key: string): Promise<string | null>;
+	/** Write `value` for `key` (overwrites). */
+	set(key: string, value: string): Promise<void>;
+	/** Delete `key`. No-op if it was never set. */
+	remove(key: string): Promise<void>;
+}
+
 /** Minimal MCP App interface (mirrors @modelcontextprotocol/ext-apps App class) */
 export interface McpApp {
 	connect(): Promise<void>;
@@ -71,6 +81,19 @@ export interface McpApp {
 	rest(params: RestRequestParams): Promise<RestResponse>;
 	/** Upload a file to file management as the current user. */
 	uploadFile(params: UploadFileParams): Promise<any>;
+	/**
+	 * Small persistent key/value store, mediated by the host.
+	 *
+	 * The app document runs in an opaque origin, so its own `localStorage` throws
+	 * or is wiped between sessions. This proxies to the host's `localStorage`
+	 * under a per-app namespace (`mcp-app:{appId}:{key}`): the host stamps the
+	 * appId itself, so one app can neither read nor overwrite another's keys.
+	 * Per browser profile, not synced across devices — keep the server the source
+	 * of truth for anything that must follow the user, and use this as a fast local
+	 * cache or for device-local UI preferences. Values are strings; serialize
+	 * structured data yourself.
+	 */
+	storage: AppStorage;
 	/**
 	 * Declare that this app renders its own AI chat window. While it owns the surface the hub's
 	 * floating launcher opens the app's chat instead of the hub's. `supported` is false on host
@@ -304,6 +327,18 @@ function createDefaultApp(): McpApp {
 		uploadFile(params) {
 			// Larger timeout — uploads can take a while.
 			return sendRequest('host/file.upload', params, 60000);
+		},
+		storage: {
+			async get(key: string) {
+				const result = await sendRequest('host/storage.get', { key }, 5000);
+				return (result?.value ?? null) as string | null;
+			},
+			async set(key: string, value: string) {
+				await sendRequest('host/storage.set', { key, value }, 5000);
+			},
+			async remove(key: string) {
+				await sendRequest('host/storage.remove', { key }, 5000);
+			},
 		},
 		registerChatSurface(owns: boolean) {
 			return sendRequest('host/chat.register', { owns }, 5000);

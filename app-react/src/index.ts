@@ -5,6 +5,7 @@
 export { PrivosAppProvider, PrivosAppContext } from './PrivosAppProvider';
 export type {
 	McpApp,
+	AppStorage,
 	RestRequestParams,
 	RestResponse,
 	UploadFileParams,
