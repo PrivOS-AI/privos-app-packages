@@ -34,6 +34,13 @@ export interface AppDescriptor {
 	relayIcon?: string;
 	/** Extra capabilities merged under runtime-owned defaults; may not override reserved keys. */
 	capabilities?: Record<string, unknown>;
+	/**
+	 * Exact published manifest (schema v3). When present it is echoed verbatim as
+	 * `serverInfo.manifest` on `initialize`, so a Hub can re-read the app's current
+	 * permission contract (and re-pin its digest after admin approval) without a
+	 * re-pair. Standalone-production `serveApp` fills this from `resolveManifest`.
+	 */
+	manifest?: Record<string, unknown>;
 }
 
 const RESERVED_CAPABILITY_KEYS = new Set(['tools', 'extensions']);
@@ -113,6 +120,7 @@ export function buildInitializeResult(
 	if (descriptor.relayIcon) serverInfo.icon = descriptor.relayIcon;
 	if (descriptor.scopes?.length) serverInfo.scopes = [...descriptor.scopes];
 	if (descriptor.permissions?.length) serverInfo.permissions = descriptor.permissions.map((permission) => ({ ...permission }));
+	if (descriptor.manifest) serverInfo.manifest = structuredClone(descriptor.manifest);
 
 	return {
 		protocolVersion: MCP_PROTOCOL_VERSION,

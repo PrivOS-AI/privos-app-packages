@@ -50,6 +50,14 @@ describe('AppServerRuntime', () => {
 		}
 	});
 
+	it('echoes descriptor.manifest verbatim as serverInfo.manifest on initialize', () => {
+		const manifest = { schemaVersion: 3, name: 'demo', version: '1.0.0', permissions: [] };
+		const result = buildInitializeResult({ ...descriptor, manifest }, { uiEnabled: false });
+		expect(result.serverInfo.manifest).toEqual(manifest);
+		expect(result.serverInfo.manifest).not.toBe(manifest);
+		expect(buildInitializeResult(descriptor, { uiEnabled: false }).serverInfo.manifest).toBeUndefined();
+	});
+
 	it('declares UI extension only when ui is configured', async () => {
 		const runtime = new AppServerRuntime({
 			descriptor,

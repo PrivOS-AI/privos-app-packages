@@ -292,10 +292,28 @@ export async function serveApp(options: ServeAppOptions): Promise<ServeAppHandle
 	// is non-blocking (returns a handle, connects in the background).
 	if (mode === 'standalone-production') {
 		const doConnect = options.__test?.connectRelay ?? connectRelay;
+		// Standalone echoes the exact published manifest on every `initialize`
+		// (`serverInfo.manifest`) so the Hub's admin Refresh can detect a changed
+		// permission contract and offer re-approval. Resolved fresh per call, like
+		// /ready, so an edited privos-app.json is observed without a restart. A
+		// manifest that fails to resolve is simply omitted — never a dispatch error.
+		const resolveManifest = options.resolveManifest ?? defaultManifestResolver;
+		const descriptorWithManifest = async (): Promise<AppDescriptor> => {
+			const base = typeof options.descriptor === 'function' ? await options.descriptor() : options.descriptor;
+			try {
+				const manifest = await resolveManifest();
+				if (manifest && typeof manifest === 'object' && !Array.isArray(manifest)) {
+					return { ...base, manifest: manifest as Record<string, unknown> };
+				}
+			} catch {
+				/* keep base descriptor */
+			}
+			return base;
+		};
 		relayRef.current = doConnect({
 			privosUrl: loaded!.relay.privosUrl,
 			standaloneIdentity: identityController,
-			descriptor: options.descriptor,
+			descriptor: descriptorWithManifest,
 			handler,
 			ui: options.ui,
 			logger: (event, fields) => logger(event, fields),

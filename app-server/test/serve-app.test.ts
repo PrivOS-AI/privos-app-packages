@@ -233,6 +233,38 @@ describe('standalone-production mode', () => {
 		expect(relay.wasStopped()).toBe(true);
 	});
 
+	it('echoes the freshly resolved manifest through the Relay descriptor so Hub Refresh can re-read the contract', async () => {
+		const relay = fakeRelay();
+		let connectArgs: { descriptor: unknown } | undefined;
+		let manifestVersion = '1.0.0';
+		const handle = await start(
+			baseOptions({
+				resolveManifest: () => ({ schemaVersion: 3, name: 'ai.privos.demo', version: manifestVersion, permissions: [] }),
+				__test: {
+					resolveRuntimeMode: modeResolution('standalone-production'),
+					// eslint-disable-next-line @typescript-eslint/no-explicit-any
+					loadStandaloneIdentity: (() => fakeLoaded()) as any,
+					// eslint-disable-next-line @typescript-eslint/no-explicit-any
+					createStandaloneRelayIdentityController: (() => ({}) as any),
+					// eslint-disable-next-line @typescript-eslint/no-explicit-any
+					connectRelay: ((args: { descriptor: unknown }) => {
+						connectArgs = args;
+						relay.connect();
+						return relay.handle;
+					}) as any,
+					env: {},
+				},
+			}),
+		);
+		const resolve = connectArgs!.descriptor as () => Promise<{ manifest?: Record<string, unknown> }>;
+		expect(typeof resolve).toBe('function');
+		expect((await resolve()).manifest).toMatchObject({ version: '1.0.0' });
+		// Re-resolved per call: an edited manifest is observed without a restart.
+		manifestVersion = '1.1.0';
+		expect((await resolve()).manifest).toMatchObject({ version: '1.1.0' });
+		await handle.close();
+	});
+
 	it('/ready is not_ready until the Relay authenticates', async () => {
 		const relay = fakeRelay(); // never connects
 		const handle = await start(
