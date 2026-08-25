@@ -1,6 +1,6 @@
 {
   "name": "@privos_ai/app-server",
-  "version": "0.8.2",
+  "version": "0.8.3",
   "description": "Business-agnostic PrivOS MCP App server runtime — Direct HTTP + Relay WebSocket",
   "type": "module",
   "main": "./dist/index.js",

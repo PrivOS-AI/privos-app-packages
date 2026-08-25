@@ -2,6 +2,14 @@
 
 Business-agnostic PrivOS MCP App server runtime for **Direct HTTP** and **Relay WebSocket**.
 
+> **0.8.3.** Relay user-token verification accepts the publisher manifest
+> `name` (the Hub's `app.appId`, which the Hub uses as the token `aud`) as an
+> audience alongside dispatch trust's `mcpAppId` (the Hub record `_id`). Before
+> this, every Hub-minted user token failed audience verification on
+> standalone-production apps and `context.actor` stayed `undefined` (fail-closed).
+> `serveApp` wires this automatically; a direct `connectRelay` caller with a
+> lazy `descriptor` passes `manifestAppId` explicitly.
+
 > **0.8.0 breaking change.** `PairingResult` is now a discriminated union
 > (`legacy-complete` / `pending-approval` / `complete`) with a required `state`
 > field, and `resumeStandalonePairing()` is added for durable app-announced

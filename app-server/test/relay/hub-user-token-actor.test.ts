@@ -623,6 +623,82 @@ describe('connectRelay automatic hub user-token actor wiring (standaloneIdentity
 		await handle.stop();
 	});
 
+	// Real Hubs pin dispatch trust to the app record `_id` while minting the
+	// user token with `aud = app.appId` (the manifest name). The fixtures above
+	// use one value for both, which is exactly why this mismatch went unnoticed.
+	const HUB_RECORD_ID = '6a8ac7d916701d742ca1cb69';
+	const MANIFEST_NAME = 'vn.example.app';
+	const manifestDescriptor: AppDescriptor = { id: MANIFEST_NAME, name: 'Demo', version: '0.0.1' };
+
+	function trustPinnedToRecordId() {
+		const fixture = dispatchTrustFixture();
+		const trust: RuntimeDispatchTrustV3 = {
+			...fixture.trust,
+			affinity: { ...fixture.trust.affinity, mcpAppId: HUB_RECORD_ID },
+		};
+		return { privateKey: fixture.privateKey, trust };
+	}
+
+	async function dispatchWithAud(aud: string, descriptorArg: AppDescriptor | (() => Promise<AppDescriptor>), extra: { manifestAppId?: string } = {}) {
+		const { token: userToken, jwk } = await mintUserToken({ rid: 'room-relay', aud });
+		jwksServer = await startJwksServer({ keys: [jwk] });
+		const { privateKey, trust } = trustPinnedToRecordId();
+		const loaded = await seedIdentity(trust, jwksServer.origin);
+		const controller = createStandaloneRelayIdentityController(loaded);
+		const { envelope } = signedRoomEnvelope({ privateKey, trust, userToken, roomId: 'room-relay' });
+		FakeWebSocket.instances = [];
+		const seenContexts: Array<{ identityState: string; actor?: unknown }> = [];
+		const fetchImpl = vi.fn(async () => ({ ok: true, json: async () => ({ access_token: 'tok' }) }));
+		const handle = connectRelay({
+			privosUrl: jwksServer.origin,
+			standaloneIdentity: controller,
+			descriptor: descriptorArg,
+			...extra,
+			handler: async (_rpc, context) => {
+				seenContexts.push(context as { identityState: string; actor?: unknown });
+				return { ok: true };
+			},
+			fetchImpl: fetchImpl as unknown as typeof fetch,
+			WebSocketImpl: FakeWebSocket as unknown as typeof import('ws').default,
+		});
+		await handle.whenConnected();
+		const ws = FakeWebSocket.instances[0]!;
+		ws.emit('message', Buffer.from(JSON.stringify(envelope)));
+		await vi.waitFor(() => expect(ws.sent.length).toBe(1));
+		await handle.stop();
+		expect(seenContexts).toHaveLength(1);
+		return seenContexts[0]!;
+	}
+
+	it('accepts a token whose aud is the manifest name when trust is pinned to the Hub record _id', async () => {
+		const context = await dispatchWithAud(MANIFEST_NAME, manifestDescriptor);
+		expect(context.identityState).toBe('verified');
+		expect(context.actor).toMatchObject({ userId: 'user-1', provenance: 'user-token' });
+	});
+
+	it('still accepts a token whose aud is the Hub record _id', async () => {
+		const context = await dispatchWithAud(HUB_RECORD_ID, manifestDescriptor);
+		expect(context.identityState).toBe('verified');
+	});
+
+	it('still rejects a token minted for another app', async () => {
+		const context = await dispatchWithAud('vn.example.other-app', manifestDescriptor);
+		expect(context.identityState).toBe('invalid');
+		expect(context.actor).toBeUndefined();
+	});
+
+	it('honors an explicit manifestAppId when the descriptor is lazy (the serveApp path)', async () => {
+		const lazy = async () => manifestDescriptor;
+		const context = await dispatchWithAud(MANIFEST_NAME, lazy, { manifestAppId: MANIFEST_NAME });
+		expect(context.identityState).toBe('verified');
+	});
+
+	it('falls back to the _id-only audience when the descriptor is lazy and no manifestAppId is given', async () => {
+		const lazy = async () => manifestDescriptor;
+		const context = await dispatchWithAud(MANIFEST_NAME, lazy);
+		expect(context.identityState).toBe('invalid');
+	});
+
 	it('opts out entirely with hubUserTokenAuth: "disabled"', async () => {
 		const { token: userToken, jwk } = await mintUserToken({ rid: 'room-relay' });
 		jwksServer = await startJwksServer({ keys: [jwk] });

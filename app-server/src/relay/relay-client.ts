@@ -363,6 +363,14 @@ export interface RelayClientOptions {
 	 * opt out entirely.
 	 */
 	hubUserTokenAuth?: 'auto' | 'disabled';
+	/**
+	 * The publisher manifest `name` (the Hub's `app.appId`), accepted as an
+	 * additional user-token audience alongside dispatch trust's `mcpAppId`
+	 * (the Hub record `_id`) — the Hub mints `aud` from the former while trust
+	 * pins the latter. Resolved automatically from a non-function `descriptor`;
+	 * pass it explicitly when the descriptor is lazy (as `serveApp` does).
+	 */
+	manifestAppId?: string;
 }
 
 export interface RelayHandle {
@@ -890,9 +898,22 @@ export function connectRelay(opts: RelayClientOptions): RelayHandle {
 		opts.runtimeDispatchV3 && typeof opts.runtimeDispatchV3.trust !== 'function'
 			? opts.runtimeDispatchV3.trust.affinity
 			: undefined;
-	const hubUserTokenAudience: string | (() => string) | undefined = opts.standaloneIdentity
-		? () => opts.standaloneIdentity!.getTrust().affinity.mcpAppId
-		: staticTrustAffinity?.mcpAppId;
+	// The Hub mints the user token with `aud = app.appId` (the publisher's
+	// manifest `name`), while dispatch trust pins `affinity.mcpAppId` (the
+	// Hub record `_id`). Both are identifiers of THIS app and nothing else, so
+	// the verifier accepts either — a token minted for another app still fails
+	// on both. The manifest name is only known synchronously from a
+	// non-function descriptor; a lazy descriptor falls back to `mcpAppId` alone.
+	const manifestAppId =
+		opts.manifestAppId?.trim() ||
+		(typeof opts.descriptor === 'function' ? undefined : opts.descriptor.id?.trim() || undefined);
+	const withManifestAudience = (mcpAppId: string): readonly string[] =>
+		manifestAppId && manifestAppId !== mcpAppId ? [mcpAppId, manifestAppId] : [mcpAppId];
+	const hubUserTokenAudience: readonly string[] | (() => readonly string[]) | undefined = opts.standaloneIdentity
+		? () => withManifestAudience(opts.standaloneIdentity!.getTrust().affinity.mcpAppId)
+		: staticTrustAffinity?.mcpAppId
+			? withManifestAudience(staticTrustAffinity.mcpAppId)
+			: undefined;
 	const autoHubUserTokenAuth =
 		(opts.hubUserTokenAuth ?? 'auto') === 'auto' &&
 		!opts.auth &&

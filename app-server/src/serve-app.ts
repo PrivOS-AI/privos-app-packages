@@ -310,9 +310,15 @@ export async function serveApp(options: ServeAppOptions): Promise<ServeAppHandle
 			}
 			return base;
 		};
+		// The app's own descriptor is usually a plain object; its `id` is the
+		// manifest name the Hub uses as user-token `aud`. Hand it over explicitly
+		// because `descriptorWithManifest` below is lazy and connectRelay must
+		// pin audiences synchronously.
+		const manifestAppId = typeof options.descriptor === 'function' ? undefined : options.descriptor.id;
 		relayRef.current = doConnect({
 			privosUrl: loaded!.relay.privosUrl,
 			standaloneIdentity: identityController,
+			...(manifestAppId ? { manifestAppId } : {}),
 			descriptor: descriptorWithManifest,
 			handler,
 			ui: options.ui,
