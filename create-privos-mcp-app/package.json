@@ -26,11 +26,17 @@
   },
   "scripts": {
     "build": "tsup",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@privos_ai/app-server": "^0.9.0"
   },
   "devDependencies": {
+    "@types/node": "^22.10.0",
     "tsup": "^8.0.0",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.10"
   },
   "engines": {
     "node": ">=18.0.0"

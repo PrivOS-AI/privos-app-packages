@@ -1,11 +1,12 @@
 {
   "name": "@privos_ai/app-server",
-  "version": "0.8.4",
+  "version": "0.9.0",
   "description": "Business-agnostic PrivOS MCP App server runtime — Direct HTTP + Relay WebSocket",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
+    "privos-app": "./dist/cli/index.js",
     "privos-app-lint": "./dist/manifest-lint-cli.js"
   },
   "exports": {
@@ -40,6 +41,7 @@
   },
   "files": [
     "dist",
+    "skill",
     "README.md",
     "LICENSE"
   ],

@@ -467,12 +467,50 @@ owner, or invalid content) with a specific reason instead of degrading silently.
 
 ```bash
 npx privos-app-lint ./privos-app.json
+# equivalent to:
+npx privos-app lint ./privos-app.json
 ```
 
 The command rejects mixed legacy/v2 permission declarations and prints deterministic
 `canonicalManifestHash` and `publisherPermissionDeclarationHash` values. The latter covers the
 publisher declaration only; Hub/Portal compute the authoritative permission contract hash with
-the versioned server-owned catalog and immutable image digest.
+the versioned server-owned catalog and immutable image digest. `privos-app-lint` is kept as a
+compatibility alias for `privos-app lint` — same output, same exit code.
+
+## CLI: `privos-app publish`
+
+Run from inside the app folder (where `privos-app.json` and `package.json` live):
+
+```bash
+npx privos-app publish
+```
+
+This packages the git worktree into a source archive (`git archive`, with the same
+dirty-tree refusal, credential-file scan, and entry-policy checks as
+`scripts/package-source.sh`), authorizes with the Portal, uploads the archive, creates
+the version, and submits it for review — in one command, no hand-minted session.
+
+Two authorization modes, both ending in a scoped, short-lived Portal grant (never a
+browser session):
+
+- **Browser approval (default).** The CLI prints a URL and a user code; approve on
+  `client.privos.io` and the CLI proceeds automatically once approved.
+- **Publisher token (CI).** Set `PRIVOS_PUBLISHER_TOKEN` (or pass `--token-stdin`) to
+  skip the browser step — only works once the listing's first version was approved
+  interactively (`409 LISTING_NOT_BOUND` otherwise).
+
+Useful flags: `--listing <slug>`, `--changelog <text>` / `--changelog-file <path>`,
+`--allow-dirty`, `--dry-run` (package only, prints the git revision + archive sha256),
+`--yes` (skip the confirmation prompt), `--portal <origin>`, `--machine-label <text>`,
+`--open` (open the approval URL), `--json` (one NDJSON event per step), `--cwd <path>`.
+
+Exit codes: `0` submitted, `2` blocked by policy (lint/package/semver/preflight
+failed/unbound listing), `3` authorization denied/expired, `4` network/portal error,
+`5` usage. The CLI's own manifest lint is structure-only — its
+`canonicalManifestHash` is **not** the Portal's canonical digest and is never sent;
+the Portal returns the authoritative `manifestDigest` after upload. Secrets are never
+printed in full: publisher tokens are shown masked to a prefix, and the publish grant
+value is never printed.
 
 ## Scripts
 
