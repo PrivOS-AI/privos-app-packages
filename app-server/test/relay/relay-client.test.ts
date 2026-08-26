@@ -176,6 +176,48 @@ class FakeWebSocket extends EventEmitter {
 	}
 }
 
+// Records client-initiated pings and supports terminate(), so keepalive behavior
+// (ping cadence, half-open termination, reconnect) is observable. terminate()
+// emits a 1006 close — the same abnormal-close path a real dropped socket takes.
+class KeepAliveWebSocket extends EventEmitter {
+	static OPEN = 1;
+	static instances: KeepAliveWebSocket[] = [];
+	readyState = KeepAliveWebSocket.OPEN;
+	pings = 0;
+	terminated = false;
+
+	constructor(_url: string, _opts?: unknown) {
+		super();
+		KeepAliveWebSocket.instances.push(this);
+		queueMicrotask(() => this.emit('open'));
+	}
+
+	send(_data: string, cb?: (err?: Error) => void) {
+		cb?.();
+	}
+
+	ping() {
+		this.pings += 1;
+	}
+
+	pong() {}
+
+	close() {
+		this.readyState = 3;
+		this.emit('close', 1000);
+	}
+
+	terminate() {
+		this.terminated = true;
+		this.readyState = 3;
+		this.emit('close', 1006);
+	}
+
+	removeAllListeners() {
+		return super.removeAllListeners();
+	}
+}
+
 describe('relayCallerAuthSurface', () => {
 	it('exposes only reserved meta keys, never params/arguments', () => {
 		const surface = relayCallerAuthSurface({
@@ -471,6 +513,96 @@ describe('connectRelay', () => {
 		FakeWebSocket.instances[0]?.emit('close', 1006);
 		await new Promise((r) => setTimeout(r, 50));
 		expect(fetchImpl.mock.calls.length).toBe(callsBeforeStop);
+	});
+
+	it('keepalive terminates a half-open socket and reconnects when no pong arrives', async () => {
+		KeepAliveWebSocket.instances = [];
+		const fetchImpl = vi.fn(async () => ({
+			ok: true,
+			json: async () => ({ access_token: 'tok' }),
+		}));
+
+		const handle = connectRelay({
+			privosUrl: 'http://hub.test',
+			clientId: 'cid',
+			clientSecret: 'sec',
+			descriptor,
+			handler: async () => ({ tools: [] }),
+			keepAliveIntervalMs: 20,
+			fetchImpl: fetchImpl as unknown as typeof fetch,
+			WebSocketImpl: KeepAliveWebSocket as unknown as typeof import('ws').default,
+		});
+
+		await handle.whenConnected();
+		const first = KeepAliveWebSocket.instances[0]!;
+		// First tick pings; the next tick finds no pong and terminates.
+		await vi.waitFor(() => expect(first.terminated).toBe(true), { timeout: 2000 });
+		expect(first.pings).toBeGreaterThanOrEqual(1);
+		// The abnormal close runs the backoff reconnect → a fresh socket opens.
+		await vi.waitFor(() => expect(KeepAliveWebSocket.instances.length).toBeGreaterThanOrEqual(2), {
+			timeout: 3000,
+		});
+		await handle.stop();
+	});
+
+	it('keepalive keeps a socket alive while pongs arrive', async () => {
+		KeepAliveWebSocket.instances = [];
+		const fetchImpl = vi.fn(async () => ({
+			ok: true,
+			json: async () => ({ access_token: 'tok' }),
+		}));
+
+		const handle = connectRelay({
+			privosUrl: 'http://hub.test',
+			clientId: 'cid',
+			clientSecret: 'sec',
+			descriptor,
+			handler: async () => ({ tools: [] }),
+			keepAliveIntervalMs: 20,
+			fetchImpl: fetchImpl as unknown as typeof fetch,
+			WebSocketImpl: KeepAliveWebSocket as unknown as typeof import('ws').default,
+		});
+
+		await handle.whenConnected();
+		const first = KeepAliveWebSocket.instances[0]!;
+		// Answer every ping with a pong so liveness never lapses across a tick.
+		first.ping = () => {
+			first.pings += 1;
+			queueMicrotask(() => first.emit('pong'));
+		};
+
+		await new Promise((r) => setTimeout(r, 120));
+		expect(first.pings).toBeGreaterThanOrEqual(2);
+		expect(first.terminated).toBe(false);
+		expect(KeepAliveWebSocket.instances.length).toBe(1);
+		await handle.stop();
+	});
+
+	it('keepalive disabled (0) never pings or terminates', async () => {
+		KeepAliveWebSocket.instances = [];
+		const fetchImpl = vi.fn(async () => ({
+			ok: true,
+			json: async () => ({ access_token: 'tok' }),
+		}));
+
+		const handle = connectRelay({
+			privosUrl: 'http://hub.test',
+			clientId: 'cid',
+			clientSecret: 'sec',
+			descriptor,
+			handler: async () => ({ tools: [] }),
+			keepAliveIntervalMs: 0,
+			fetchImpl: fetchImpl as unknown as typeof fetch,
+			WebSocketImpl: KeepAliveWebSocket as unknown as typeof import('ws').default,
+		});
+
+		await handle.whenConnected();
+		const first = KeepAliveWebSocket.instances[0]!;
+		await new Promise((r) => setTimeout(r, 80));
+		expect(first.pings).toBe(0);
+		expect(first.terminated).toBe(false);
+		expect(KeepAliveWebSocket.instances.length).toBe(1);
+		await handle.stop();
 	});
 
 	it('passes only auth surface to extractor', async () => {

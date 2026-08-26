@@ -170,6 +170,14 @@ const BACKOFF_MS = [1_000, 2_000, 5_000, 10_000, 30_000] as const;
 const DEFAULT_PAIRING_TIMEOUT_MS = 30_000;
 const DEFAULT_OAUTH_TIMEOUT_MS = 15_000;
 const DEFAULT_OPEN_HANDSHAKE_TIMEOUT_MS = 15_000;
+// Client-initiated keepalive. A live socket whose peer has silently gone away
+// (half-open: no FIN/RST ever arrives — laptop sleep, NAT/idle drop, a Hub that
+// vanished) keeps `readyState === OPEN` forever, so the process stays up while
+// dispatch is dead and nothing triggers the reconnect path. A periodic ping that
+// expects a pong within one interval detects that, terminates the dead socket,
+// and lets the existing `close` → backoff reconnect restore service in-process —
+// no external healthcheck or process restart required.
+const DEFAULT_KEEPALIVE_INTERVAL_MS = 30_000;
 
 type PairingWireResult = {
 	paired?: boolean;
@@ -332,6 +340,15 @@ export interface RelayClientOptions {
 	oauthTimeoutMs?: number;
 	/** Timeout waiting for WebSocket `open` after create (default 15s). */
 	openHandshakeTimeoutMs?: number;
+	/**
+	 * Interval for client-initiated keepalive pings (default 30s). Each tick pings
+	 * the Hub and, if the previous ping got no pong before the next tick, terminates
+	 * the socket so the reconnect path restores it — this is what lets a
+	 * long-running app self-heal a silently dead (half-open) connection without an
+	 * external healthcheck. Set to `0` to disable (the app then relies solely on
+	 * server-driven pings and OS timeouts, matching pre-keepalive behavior).
+	 */
+	keepAliveIntervalMs?: number;
 	/** Injected for tests. */
 	fetchImpl?: typeof fetch;
 	WebSocketImpl?: typeof WebSocket;
@@ -945,6 +962,7 @@ export function connectRelay(opts: RelayClientOptions): RelayHandle {
 	const oauthTimeoutMs = opts.oauthTimeoutMs ?? DEFAULT_OAUTH_TIMEOUT_MS;
 	const openHandshakeTimeoutMs =
 		opts.openHandshakeTimeoutMs ?? DEFAULT_OPEN_HANDSHAKE_TIMEOUT_MS;
+	const keepAliveIntervalMs = opts.keepAliveIntervalMs ?? DEFAULT_KEEPALIVE_INTERVAL_MS;
 	const maxBufferedBytes = runtime.getLimits().maxBufferedBytes;
 
 	let stopped = false;
@@ -952,6 +970,7 @@ export function connectRelay(opts: RelayClientOptions): RelayHandle {
 	let wsAuthenticated = false;
 	let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 	let openHandshakeTimer: ReturnType<typeof setTimeout> | null = null;
+	let keepAliveTimer: ReturnType<typeof setInterval> | null = null;
 	let backoffIndex = 0;
 	let connectGeneration = 0;
 	let oauthAbort: AbortController | null = null;
@@ -982,6 +1001,13 @@ export function connectRelay(opts: RelayClientOptions): RelayHandle {
 		if (openHandshakeTimer) {
 			clearTimeout(openHandshakeTimer);
 			openHandshakeTimer = null;
+		}
+	};
+
+	const clearKeepAliveTimer = () => {
+		if (keepAliveTimer) {
+			clearInterval(keepAliveTimer);
+			keepAliveTimer = null;
 		}
 	};
 
@@ -1060,6 +1086,12 @@ export function connectRelay(opts: RelayClientOptions): RelayHandle {
 				// close handler schedules reconnect when generation still current
 			}, openHandshakeTimeoutMs);
 
+			// Liveness for this socket's keepalive: reset to true whenever the Hub
+			// answers our ping (or pings us), false when we send a ping and are
+			// still waiting. A tick that finds it already false means a full
+			// interval passed with no pong — the peer is gone.
+			let isAlive = true;
+
 			ws.on('open', () => {
 				clearOpenHandshakeTimer();
 				if (stopped || generation !== connectGeneration) {
@@ -1077,6 +1109,39 @@ export function connectRelay(opts: RelayClientOptions): RelayHandle {
 					connectedOnce = true;
 					connectedResolve?.();
 				}
+				// Start client-initiated keepalive for this connection. Only one
+				// socket is ever active, so clear any prior interval first.
+				clearKeepAliveTimer();
+				if (keepAliveIntervalMs > 0) {
+					isAlive = true;
+					keepAliveTimer = setInterval(() => {
+						if (stopped || generation !== connectGeneration) {
+							clearKeepAliveTimer();
+							return;
+						}
+						if (!isAlive) {
+							// No pong within a full interval: the socket is half-open.
+							// Terminate to force a `close` event, which runs the
+							// existing backoff reconnect — self-healing in-process.
+							log('relay.keepalive_timeout', { generation });
+							try {
+								if (typeof ws.terminate === 'function') ws.terminate();
+								else ws.close();
+							} catch {
+								/* ignore */
+							}
+							return;
+						}
+						isAlive = false;
+						try {
+							ws.ping();
+						} catch {
+							/* ignore */
+						}
+					}, keepAliveIntervalMs);
+					// Don't let the keepalive interval alone keep the process alive.
+					keepAliveTimer.unref?.();
+				}
 			});
 
 			ws.on('message', (raw: RawData) => {
@@ -1090,6 +1155,7 @@ export function connectRelay(opts: RelayClientOptions): RelayHandle {
 			});
 
 			ws.on('ping', () => {
+				isAlive = true;
 				try {
 					ws.pong();
 				} catch {
@@ -1097,8 +1163,13 @@ export function connectRelay(opts: RelayClientOptions): RelayHandle {
 				}
 			});
 
+			ws.on('pong', () => {
+				isAlive = true;
+			});
+
 			ws.on('close', (code) => {
 				clearOpenHandshakeTimer();
+				clearKeepAliveTimer();
 				log('relay.disconnected', { code, generation });
 				if (activeWs === ws) {
 					activeWs = null;
@@ -1363,6 +1434,7 @@ export function connectRelay(opts: RelayClientOptions): RelayHandle {
 			wsAuthenticated = false;
 			clearReconnectTimer();
 			clearOpenHandshakeTimer();
+			clearKeepAliveTimer();
 			connectGeneration += 1;
 			oauthAbort?.abort();
 			oauthAbort = null;
