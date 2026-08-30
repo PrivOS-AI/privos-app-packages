@@ -156,6 +156,13 @@ export interface PrivosHostContext {
 	userId?: string;
 	username?: string;
 	theme?: string;
+	/**
+	 * Resolved workspace theme colours/tokens for the current mode, keyed by the
+	 * exact `--base-*` CSS custom property name (e.g. `--base-primary`,
+	 * `--base-bg-main`, `--base-radius-md`, `--base-font-family`). Applied to this
+	 * document's root automatically by the provider — see `applyThemeTokens` below.
+	 */
+	themeTokens?: Record<string, string>;
 	roomId?: string;
 	[key: string]: unknown;
 }
@@ -188,6 +195,37 @@ interface PrivosAppProviderProps {
 let bufferedHostContext: any | undefined;
 let activeContextHandler: ((ctx: any) => void) | undefined;
 
+/**
+ * Applies the workspace theme carried on a `HOST_CONTEXT_CHANGED` push directly
+ * to this app document, so an app visually inherits the hub's theme with zero
+ * app-side wiring:
+ *  - `data-theme` on `<html>` is set to `theme` ('light' | 'dark') for apps that
+ *    key CSS off that attribute (mirrors the hub's own convention).
+ *  - each `themeTokens` entry is written as a CSS custom property on `<html>` via
+ *    `style.setProperty`, so app CSS can reference `var(--base-primary)` etc.
+ * Re-run on every `HOST_CONTEXT_CHANGED` (light/dark flip AND an admin/user theme
+ * save that re-pushes the same mode), so live edits propagate without a reload.
+ * No-op outside a DOM (SSR, or tests without jsdom) and tolerant of a context
+ * that carries neither field — existing apps that never adopt theming are
+ * unaffected.
+ */
+function applyThemeTokens(context: unknown): void {
+	if (typeof document === 'undefined' || !context || typeof context !== 'object') return;
+	const root = document.documentElement;
+	const { theme, themeTokens } = context as { theme?: unknown; themeTokens?: unknown };
+
+	if (typeof theme === 'string' && theme) {
+		root.dataset.theme = theme;
+	}
+	if (themeTokens && typeof themeTokens === 'object') {
+		for (const [name, value] of Object.entries(themeTokens as Record<string, unknown>)) {
+			if (typeof value === 'string' && value) {
+				root.style.setProperty(name, value);
+			}
+		}
+	}
+}
+
 if (typeof window !== 'undefined') {
 	window.addEventListener('message', (event: MessageEvent) => {
 		// Only trust the host bridge (parent frame). Rejecting other sources stops a
@@ -198,6 +236,7 @@ if (typeof window !== 'undefined') {
 		if (data.method !== 'HOST_CONTEXT_CHANGED') return;
 
 		bufferedHostContext = data.params;
+		applyThemeTokens(data.params);
 		if (activeContextHandler) {
 			try {
 				activeContextHandler(data.params);

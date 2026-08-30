@@ -133,6 +133,22 @@ Wrap your app root with `PrivosAppProvider`. It creates a PostMessage-based MCP 
 
 `usePrivosContext().theme` returns `'light'` or `'dark'`, updated in real-time when the Privos user toggles theme. See [Theme Integration docs](https://github.com/PrivOS-AI/privos-dev-docs/blob/main/mcp-app-platform/developer-guide.md#7-theme-sync-lightdark-mode).
 
+`PrivosAppProvider` also applies the workspace's resolved theme colours automatically: as soon as the host pushes a context with `themeTokens`, each `--base-*` CSS custom property (`--base-primary`, `--base-bg-main`, `--base-radius-md`, `--base-font-family`, etc.) is written onto this document's `<html>` element via `style.setProperty`, and `<html data-theme>` is kept in sync with the active mode. No setup is required — reference the variables directly in your CSS:
+
+```css
+body {
+  background: var(--base-bg-main, #fff);
+  color: var(--base-text-primary, #111);
+  font-family: var(--base-font-family, inherit);
+}
+button.primary {
+  background: var(--base-primary, #2563eb);
+  border-radius: var(--base-radius-md, 6px);
+}
+```
+
+Always provide a fallback value so the app still looks reasonable standalone or before the first host context arrives. The raw token map is also available as `usePrivosContext().themeTokens` for the rare case an app needs a value in JS (e.g. to theme a `<canvas>`).
+
 ## License
 
 MIT

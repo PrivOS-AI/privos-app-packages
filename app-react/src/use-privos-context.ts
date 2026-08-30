@@ -21,6 +21,14 @@ export interface PrivosContext {
 	roomSlug?: string;
 	appId?: string;
 	appUrl?: string;
+	/**
+	 * Resolved workspace theme tokens for the current mode, keyed by the exact
+	 * `--base-*` CSS custom property name. `PrivosAppProvider` already applies
+	 * these to this document's root automatically; exposed here so app code can
+	 * also read the raw values (e.g. to theme a canvas or a third-party widget
+	 * that does not respond to CSS variables).
+	 */
+	themeTokens?: Record<string, string>;
 }
 
 const defaultState: PrivosContext = {
@@ -50,6 +58,11 @@ function mergeHostContext(previous: PrivosContext, patch: Record<string, unknown
 		...(stringValue('roomSlug') ? { roomSlug: stringValue('roomSlug') } : {}),
 		...(stringValue('appId') ? { appId: stringValue('appId') } : {}),
 		...(stringValue('appUrl') ? { appUrl: stringValue('appUrl') } : {}),
+		...(patch.themeTokens && typeof patch.themeTokens === 'object'
+			? { themeTokens: patch.themeTokens as Record<string, string> }
+			: previous.themeTokens
+				? { themeTokens: previous.themeTokens }
+				: {}),
 	};
 }
 
