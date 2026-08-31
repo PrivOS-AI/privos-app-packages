@@ -72,6 +72,7 @@ export type {
 	CallerCredentialExtractor,
 	CallerCredentialResolution,
 	UiResourceProvider,
+	UiAssetContent,
 	RuntimeLimits,
 	AppServerRuntimeOptions,
 	DispatchOutcome,
@@ -295,3 +296,13 @@ export {
 	SUPPORTED_MANIFEST_SCHEMA_VERSIONS,
 } from './manifest-tools.js';
 export type { ManifestLintResult } from './manifest-tools.js';
+
+export { serveBuiltUi } from './ui/serve-built-ui.js';
+export type { ServeBuiltUi, ServeBuiltUiOptions } from './ui/serve-built-ui.js';
+export {
+	MCP_UI_ASSET_FILENAME_RE,
+	MCP_UI_ASSET_EXTENSIONS,
+	deriveAssetUriPrefix,
+} from './ui/asset-filename-rule.js';
+export type { McpUiAssetExtension } from './ui/asset-filename-rule.js';
+export type { AssetManifestEntry, AssetsManifest } from './ui/assets-manifest.js';

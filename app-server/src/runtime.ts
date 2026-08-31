@@ -51,6 +51,11 @@ export type AppErrorMapper = (
 	context: ToolCallContext,
 ) => JsonRpcErrorObject | undefined;
 
+/** One `resources/read` content entry for a split-out `ui://<appSlug>/assets/<file>` resource. */
+export type UiAssetContent =
+	| { uri: string; mimeType: string; text: string }
+	| { uri: string; mimeType: string; blob: string };
+
 export interface UiResourceProvider {
 	uri: string;
 	mimeType?: typeof MCP_UI_MIME | string;
@@ -58,6 +63,25 @@ export interface UiResourceProvider {
 		params: unknown;
 		context: ToolCallContext;
 	}): string | Promise<string>;
+	/**
+	 * Serve one `ui://<appSlug>/assets/<file>` resource split out of the shell
+	 * HTML (hashed JS/CSS/fonts/etc). Return `null` for unlisted, `.map`, or
+	 * traversal-unsafe files — the runtime then falls through to the app's own
+	 * `resources/read` handling, unchanged from apps that never set this.
+	 */
+	readAsset?(uri: string): UiAssetContent | null | Promise<UiAssetContent | null>;
+	/** Serve the sibling `assets-manifest.json` resource: `{ files: [{ name, size, type }] }`. */
+	readAssetsManifest?(): unknown | Promise<unknown>;
+	/**
+	 * `ui://<appSlug>/assets/` — set this from `serveBuiltUi(...).assetUriPrefix`
+	 * (or the equivalent for a hand-rolled split-build provider). Presence of
+	 * `readAsset`/`readAssetsManifest` marks a split-build/relay-asset app; the
+	 * runtime then asserts this prefix's `<appSlug>`, `uri`'s host, and the app
+	 * manifest name are all the same string (see `assertSplitBuildUiIdentity`).
+	 * Legacy inline-HTML providers (neither `readAsset` nor `readAssetsManifest`)
+	 * never need this and are exempt from the check.
+	 */
+	assetUriPrefix?: string;
 }
 
 export interface RuntimeLimits {
@@ -110,9 +134,22 @@ export class AppServerRuntime {
 	 */
 	private readonly inFlight = new Map<string, Set<string>>();
 	private readonly opts: AppServerRuntimeOptions;
+	/**
+	 * Tracks whether `assertSplitBuildUiIdentity` already ran successfully — a
+	 * static (non-function) descriptor is checked once here at construction
+	 * (the earliest possible point, before any request); a lazily-resolved
+	 * descriptor is checked once on its first resolution in `resolveDescriptor`.
+	 * A failing check never sets this, so a genuinely misconfigured app keeps
+	 * failing loudly on every subsequent resolution instead of only once.
+	 */
+	private splitBuildUiIdentityChecked = false;
 
 	constructor(opts: AppServerRuntimeOptions) {
 		this.opts = opts;
+		if (typeof opts.descriptor !== 'function') {
+			assertSplitBuildUiIdentity(opts.ui, opts.descriptor);
+			this.splitBuildUiIdentityChecked = true;
+		}
 	}
 
 	getLimits(): Required<
@@ -162,7 +199,12 @@ export class AppServerRuntime {
 
 	async resolveDescriptor(): Promise<AppDescriptor> {
 		const d = this.opts.descriptor;
-		return typeof d === 'function' ? await d() : d;
+		const descriptor = typeof d === 'function' ? await d() : d;
+		if (!this.splitBuildUiIdentityChecked) {
+			assertSplitBuildUiIdentity(this.opts.ui, descriptor);
+			this.splitBuildUiIdentityChecked = true;
+		}
+		return descriptor;
 	}
 
 	async buildContext(input: {
@@ -431,18 +473,37 @@ export class AppServerRuntime {
 		}
 
 		if (method === 'resources/read' && this.opts.ui) {
+			const ui = this.opts.ui;
 			const uri = (params as { uri?: string } | null)?.uri;
-			if (uri === this.opts.ui.uri) {
-				const html = await this.opts.ui.renderHtml({ params, context });
+			if (uri === ui.uri) {
+				const html = await ui.renderHtml({ params, context });
 				return {
 					contents: [
 						{
-							uri: this.opts.ui.uri,
-							mimeType: this.opts.ui.mimeType ?? MCP_UI_MIME,
+							uri: ui.uri,
+							mimeType: ui.mimeType ?? MCP_UI_MIME,
 							text: html,
 						},
 					],
 				};
+			}
+			if (ui.readAssetsManifest && uri === assetsManifestUriFor(ui.uri)) {
+				const manifest = await ui.readAssetsManifest();
+				return {
+					contents: [
+						{
+							uri,
+							mimeType: 'application/json',
+							text: JSON.stringify(manifest),
+						},
+					],
+				};
+			}
+			if (ui.readAsset && uri !== undefined) {
+				const asset = await ui.readAsset(uri);
+				if (asset) {
+					return { contents: [asset] };
+				}
 			}
 		}
 
@@ -491,6 +552,63 @@ async function raceWithTimeout<T>(
 	} finally {
 		if (timer) clearTimeout(timer);
 	}
+}
+
+/** The `assets-manifest.json` resource sits beside `ui.uri`, not under the assets/ prefix. */
+function assetsManifestUriFor(uiUri: string): string {
+	const lastSlash = uiUri.lastIndexOf('/');
+	return lastSlash === -1 ? 'assets-manifest.json' : `${uiUri.slice(0, lastSlash + 1)}assets-manifest.json`;
+}
+
+/** `ui://<appSlug>/assets/` → `<appSlug>`, or `undefined` if not shaped that way. */
+function appSlugFromAssetUriPrefix(assetUriPrefix: string): string | undefined {
+	const match = /^ui:\/\/([^/]+)\/assets\/$/.exec(assetUriPrefix);
+	return match?.[1];
+}
+
+/**
+ * A split-build/relay-asset UI — one exposing `readAsset` and/or
+ * `readAssetsManifest`, i.e. built with `serveBuiltUi(...)` or an equivalent
+ * custom provider — MUST serve its hashed assets under the exact identifier
+ * the Hub resolves for this app everywhere else: the shell `ui.uri` host,
+ * the app manifest name (`descriptor.id` / `app.appId`), and the provider's
+ * own `assetUriPrefix` slug (when set) must all be the same string. A
+ * mismatch here is invisible at build time and only surfaces once the Hub
+ * fetches `ui://<wrong-slug>/assets/…` and every asset 404s on the app's
+ * first tab open — so this fails at registration instead, loudly and once.
+ *
+ * Legacy inline-HTML providers (neither `readAsset` nor `readAssetsManifest`)
+ * are exempt: their `ui.uri` host may legitimately differ from the manifest
+ * name, and this function returns immediately without checking anything.
+ */
+function assertSplitBuildUiIdentity(ui: UiResourceProvider | undefined, descriptor: AppDescriptor): void {
+	if (!ui || (!ui.readAsset && !ui.readAssetsManifest)) return;
+
+	const manifestName = descriptor.id;
+	let host: string;
+	try {
+		host = new URL(ui.uri).host;
+	} catch {
+		throw new Error(
+			`Split-build UI resourceUri "${ui.uri}" is not a parseable URI — expected "ui://${manifestName}/…" ` +
+				`(split-build assets are fetched by the Hub at ui://${manifestName}/assets/…).`,
+		);
+	}
+
+	const assetSlug = ui.assetUriPrefix ? appSlugFromAssetUriPrefix(ui.assetUriPrefix) : undefined;
+	const hostMismatch = host !== manifestName;
+	const assetSlugMismatch = assetSlug !== undefined && assetSlug !== manifestName;
+	if (!hostMismatch && !assetSlugMismatch) return;
+
+	const found = [
+		`resourceUri host "${host}"`,
+		assetSlug !== undefined ? `serveBuiltUi appSlug "${assetSlug}"` : undefined,
+	].filter((value): value is string => value !== undefined);
+	throw new Error(
+		`Split-build UI identity mismatch: ${found.join(' / ')} must equal the app manifest name "${manifestName}" ` +
+			`(app.appId) — split-build assets are fetched by the Hub at ui://${manifestName}/assets/…. ` +
+			`Build ui.uri as \`ui://${manifestName}/…\` and pass appSlug: "${manifestName}" to serveBuiltUi(...).`,
+	);
 }
 
 function toolNameFromParams(params: unknown): string | undefined {

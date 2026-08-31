@@ -463,6 +463,43 @@ it is delivered live or the app is re-paired — this is expected, not a bug.
 `loadStandaloneIdentity` refuses to load a tampered file (wrong mode, foreign
 owner, or invalid content) with a specific reason instead of degrading silently.
 
+## Split-build UI (`serveBuiltUi`)
+
+Serve a Vite-built app UI (`base: './'`) over MCP `resources/read` without inlining the whole
+bundle: the shell HTML stays a small resource, and hashed `assets/` files (JS/CSS/fonts/etc) are
+served individually so a Hub can cache them by content hash instead of refetching the entire
+bundle on every open.
+
+```ts
+import { serveBuiltUi } from '@privos_ai/app-server';
+
+const appSlug = 'ai.privos.demo';
+const shell = serveBuiltUi({ distDir: './dist/ui', appSlug });
+
+const ui = {
+	uri: `ui://${appSlug}/form.html`,
+	renderHtml: () => shell.renderHtml(),
+	readAsset: (uri: string) => shell.readAsset(uri),
+	readAssetsManifest: () => shell.readAssetsManifest(),
+};
+```
+
+`serveBuiltUi({ distDir, appSlug })` reads `distDir/index.html` once at construction, injects the
+opt-in `<meta name="privos-ui-assets" content="relay">` tag (if not already present) plus an
+inline boot watchdog `<script>`, and throws immediately if any `<script src>`/`<link href>` is not
+relative (`./assets/…` or `assets/…`) — a sure sign the app was built without Vite `base: './'`.
+It also validates every file under `distDir/assets` at construction: each name must match
+`MCP_UI_ASSET_FILENAME_RE` (content-hashed, allowlisted extension), be ≤ 2 MB, and no `.map` files
+may be present — a violation throws with the full list of offenders rather than serving a broken
+build. `readAsset(uri)` answers `ui://<appSlug>/assets/<file>` resources (`assetUriPrefix`),
+`readAssetsManifest()` answers the sibling `ui://<appSlug>/assets-manifest.json` resource; both are
+wired automatically once `UiResourceProvider.readAsset` / `readAssetsManifest` are set — see
+`runtime.ts`'s `resources/read` handling.
+
+`MCP_UI_ASSET_FILENAME_RE`, `MCP_UI_ASSET_EXTENSIONS`, and `deriveAssetUriPrefix(appSlug)` are
+exported for callers that need to validate or derive asset identifiers outside `serveBuiltUi`
+itself.
+
 ## Manifest v2 preflight
 
 ```bash

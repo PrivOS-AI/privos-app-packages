@@ -9,6 +9,7 @@ import type { AuthOptions } from '../auth/user-token.js';
 import {
 	INVALID_REQUEST,
 	PARSE_ERROR,
+	SERVER_BUSY,
 	errorResponse,
 	jsonRpcError,
 } from '../protocol/errors.js';
@@ -1202,24 +1203,33 @@ export function connectRelay(opts: RelayClientOptions): RelayHandle {
 		rpcFields: { generation?: number; method?: string; toolName?: string } = {},
 	): void {
 		if (ws.readyState !== WebSocketImpl.OPEN) return;
+		let outboundPayload = payload;
 		if (typeof ws.bufferedAmount === 'number' && ws.bufferedAmount > maxBufferedBytes) {
 			log('relay.backpressure', {
 				bufferedAmount: ws.bufferedAmount,
 				maxBufferedBytes,
 			});
-			return;
+			const responseId = responseFrameId(payload);
+			// No derivable id (payload isn't a response-shaped object) — nothing to
+			// attach an error to, so the frame is dropped as before.
+			if (responseId === undefined) return;
+			// The congested payload may be arbitrarily large (a UI asset blob, a
+			// big tool result); this replacement is small enough to still queue
+			// while backpressured, so the caller learns the request failed
+			// instead of hanging until its own request timeout.
+			outboundPayload = errorResponse(responseId, jsonRpcError(SERVER_BUSY, 'relay_backpressure'));
 		}
 		let text: string;
 		try {
-			text = JSON.stringify(payload);
+			text = JSON.stringify(outboundPayload);
 		} catch {
 			log('relay.serialize_error', { reason: 'json_stringify_failed' });
 			return;
 		}
 		try {
 			const payloadObject =
-				payload && typeof payload === 'object' && !Array.isArray(payload)
-					? (payload as Record<string, unknown>)
+				outboundPayload && typeof outboundPayload === 'object' && !Array.isArray(outboundPayload)
+					? (outboundPayload as Record<string, unknown>)
 					: undefined;
 			const responseId =
 				payloadObject &&
@@ -1457,6 +1467,15 @@ export function connectRelay(opts: RelayClientOptions): RelayHandle {
 			log('relay.stopped', {});
 		},
 	};
+}
+
+/** Every `safeSend` payload is a JSON-RPC response/error object; extract its `id` for the backpressure substitute. */
+function responseFrameId(payload: unknown): string | number | null | undefined {
+	if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return undefined;
+	const obj = payload as Record<string, unknown>;
+	if (!Object.prototype.hasOwnProperty.call(obj, 'id')) return undefined;
+	const id = obj.id;
+	return typeof id === 'string' || typeof id === 'number' || id === null ? id : undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
