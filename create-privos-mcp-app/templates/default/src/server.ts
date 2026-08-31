@@ -41,6 +41,7 @@ import {
 	parseRuntimeDispatchTrustV3Json,
 	resolveRuntimeMode,
 	RuntimeModeError,
+	serveBuiltUi,
 	SingleProcessFilePublisherRuntimeTrustStoreV3,
 	standaloneIdentityFileExists,
 	verifyPrivosUser,
@@ -68,7 +69,15 @@ const publisherManifest = JSON.parse(
 	port: number;
 	runtimeTrustProvisioningUrl?: string;
 };
+/**
+ * The manifest identity (`privos-app.json`'s `name`, e.g. `com.privos.<name>`)
+ * — not the bare display name. `ui://` resource URIs and the split asset
+ * prefix are keyed on this value (`appSlug` = `app.appId` = manifest id),
+ * matching `privos-app.json`'s `tools[].ui.resourceUri` and the value the Hub
+ * uses to address this app's assets.
+ */
 const APP_ID = publisherManifest.name;
+const DIST_DIR = path.resolve(process.cwd(), 'dist');
 
 function publisherTrustBootstrap() {
 	const filePath = process.env.PRIVOS_PUBLISHER_RUNTIME_TRUST_STORE_PATH;
@@ -231,15 +240,34 @@ async function mcpHandler(request: ApplicationMcpRequest, _ctx: ToolCallContext)
 	throw Object.assign(new Error(`Method not found: ${request.method}`), { code: -32601 });
 }
 
+/**
+ * Constructed eagerly, once, at module load when `NODE_ENV=production` — it
+ * reads `dist/index.html` and validates every file under `dist/assets`
+ * (content-hashed filenames, allowed extensions, no `.map`, ≤ 2 MB), throwing
+ * with the full offender list on a misconfigured build. That must crash the
+ * process at boot, not surface as a blank frame on the first real request.
+ * `undefined` in dev: `dist/` does not exist yet before the first `npm run build`.
+ */
+const builtUi = process.env.NODE_ENV === 'production'
+	? serveBuiltUi({ distDir: DIST_DIR, appSlug: APP_ID })
+	: undefined;
+
 const dashboardUi: UiResourceProvider = {
-	uri: 'ui://{{APP_NAME}}/dashboard.html',
-	renderHtml: async () => process.env.NODE_ENV === 'production'
-		? readFileSync(path.resolve(process.cwd(), 'dist/index.html'), 'utf8')
+	uri: `ui://${APP_ID}/dashboard.html`,
+	renderHtml: async () => builtUi
+		? builtUi.renderHtml()
 		: `<!DOCTYPE html>
 <html><head><title>{{APP_NAME}}</title><style>html,body{margin:0}</style></head>
 <body><div id="root"></div>
 <script type="module" src="http://localhost:5173/src/ui/main.tsx"></script>
 </body></html>`,
+	...(builtUi
+		? {
+				readAsset: (uri: string) => builtUi.readAsset(uri),
+				readAssetsManifest: () => builtUi.readAssetsManifest(),
+				assetUriPrefix: builtUi.assetUriPrefix,
+			}
+		: {}),
 };
 
 /**
@@ -259,7 +287,9 @@ function startDirectHttp(): void {
 		}));
 	}
 	app.use(express.json());
-	app.use(express.static(path.resolve(process.cwd(), 'dist')));
+	// Built UI assets (`dist/assets/…`) are served by the Hub over the tokened
+	// relay route, not by this app — no `express.static(dist)`. `dashboardUi`
+	// answers `resources/read` for both the shell and the split assets.
 
 	// The runtime exposes the exact reviewed Publisher manifest.
 	app.get('/.well-known/mcp/manifest.json', (_req, res) => {

@@ -6,6 +6,12 @@ Version `0.3.0` adds the canonical Marketplace `privos-app.json`, production
 runtime-v3 dispatch verification, a production Dockerfile, NodeNext ESM server
 output and graceful container shutdown.
 
+Version `0.5.0` fixes production UIs rendering blank: the generated server now
+serves the built UI through `@privos_ai/app-server`'s `serveBuiltUi` helper
+instead of returning the raw Vite `index.html`. See
+[Production UI: assets served by the Hub](#production-ui-assets-served-by-the-hub)
+below — apps scaffolded from `0.4.0` or earlier keep the bug until upgraded.
+
 ## Usage
 
 ```bash
@@ -27,8 +33,9 @@ my-app/
 └── src/
     ├── server.ts           # MCP server (manifest + JSON-RPC + UI serving)
     └── ui/
-        ├── App.tsx         # PrivosAppProvider wrapper
-        └── main.tsx        # React entry point
+        ├── App.tsx            # PrivosAppProvider wrapper
+        ├── main.tsx           # React entry point; sets the boot flag the shell's watchdog waits for
+        └── lazy-boundary.tsx  # Error boundary for React.lazy panels — "Reload" on a stale chunk
 ```
 
 ## Generated Server
@@ -50,6 +57,39 @@ import { PrivosAppProvider, usePrivosContext, useLists } from '@privos_ai/app-re
 ```
 
 The generated backend uses `@privos_ai/app-server`.
+
+## Production UI: assets served by the Hub
+
+`npm run build` produces `dist/index.html` (the shell) plus content-hashed
+files under `dist/assets/` (Vite `base: './'`, `build.manifest: true`,
+`sourcemap: false`; no `publicDir` — everything the UI needs must ship as a
+hashed `assets/` file). The generated server never serves `dist/assets`
+itself: at production boot it constructs `serveBuiltUi({ distDir, appSlug })`
+once, and that instance answers `resources/read` for both the shell
+(`ui://<app>/dashboard.html`) and each asset (`ui://<app>/assets/<file>`) —
+the Hub fetches assets over the same MCP transport as the shell, caches them,
+and re-serves them from its own origin behind a short-lived per-user token so
+the `about:srcdoc` frame can load them cross-origin. This requires a Hub that
+understands the `<meta name="privos-ui-assets" content="relay">` opt-in the
+shell carries and the asset-relay route — **requires Hub ≥ tenant.N**. On an
+older Hub the shell's inline boot watchdog shows a "Retry" panel after
+10 seconds instead of rendering blank.
+
+`serveBuiltUi` validates the build at construction and throws (crashing the
+process at boot, not on the first request) if:
+
+- any `<script>`/`<link>` tag in `index.html` is not `./assets/…` or
+  `assets/…` (the app was built without `base: './'`);
+- a file under `dist/assets` does not match the content-hashed filename rule
+  `name-<hash>.ext` (hash ≥ 8 chars) with an allowed extension (`js`, `css`,
+  `svg`, `json`, `woff`, `woff2`, `ttf`, `png`, `jpg`, `jpeg`, `gif`, `webp`,
+  `avif`, `ico`, `wasm`, `gz`);
+- a `.map` file is present under `dist/assets` (sourcemaps must never be
+  published — the build already disables them);
+- an asset exceeds 2 MB.
+
+Files that don't match the filename rule or aren't listed in the build's
+assets manifest are never served, even if they exist on disk.
 
 ## Production runtime boundary
 

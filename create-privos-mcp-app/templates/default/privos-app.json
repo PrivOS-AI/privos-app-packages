@@ -32,7 +32,7 @@
         }
       },
       "ui": {
-        "resourceUri": "ui://{{APP_NAME}}/dashboard.html"
+        "resourceUri": "ui://{{APP_ID}}/dashboard.html"
       }
     }
   ],
