@@ -186,13 +186,6 @@ const authOptions: AuthOptions = {
 	...(process.env.PRIVOS_HUB_ISSUER ? { issuer: process.env.PRIVOS_HUB_ISSUER } : {}),
 };
 
-/** @deprecated Prefer importing `verifyPrivosUser` from `@privos_ai/app-server/auth`. */
-export async function verifyPrivosUserFromHeader(
-	authHeader: string | undefined,
-): Promise<VerifiedActor> {
-	return verifyPrivosUser(authHeader, authOptions);
-}
-
 export async function requirePrivosUser(req: Request, res: Response, next: NextFunction): Promise<void> {
 	try {
 		(req as Request & { privosUser?: VerifiedActor }).privosUser = await verifyPrivosUser(
