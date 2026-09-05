@@ -215,6 +215,11 @@ const descriptor: AppDescriptor = {
 	description: publisherManifest.description,
 	author: publisherManifest.author,
 	scopes: publisherManifest.scopes,
+	// Echoed on initialize so Hub Admin → Refresh can compare the running
+	// manifest with the approved one. Same object that drives tools/list and
+	// the well-known manifest, so the Hub can never pin a contract this
+	// process does not serve.
+	manifest: publisherManifest,
 };
 
 async function mcpHandler(request: ApplicationMcpRequest, _ctx: ToolCallContext) {

@@ -92,7 +92,7 @@ describe('scaffoldApp', () => {
 		const pkg = JSON.parse(
 			fs.readFileSync(path.join(targetDir, 'package.json'), 'utf-8'),
 		) as { dependencies: Record<string, string>; scripts: Record<string, string> };
-		expect(pkg.dependencies['@privos_ai/app-server']).toBe('^0.10.0');
+		expect(pkg.dependencies['@privos_ai/app-server']).toBe('^0.10.1');
 		expect(pkg.scripts.start).toBe('node dist-server/server.js');
 	});
 

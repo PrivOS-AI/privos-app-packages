@@ -20,7 +20,7 @@ import {
 	type StandaloneIdentityV2,
 } from '../../src/relay/standalone-identity.js';
 import { sha256CanonicalJson } from '../../src/manifest-tools.js';
-import { relayCallerAuthSurface } from '../../src/runtime.js';
+import { AppServerRuntime, relayCallerAuthSurface } from '../../src/runtime.js';
 import {
 	BoundedRuntimeDispatchReplayConsumerV3,
 	sha256RuntimeDispatchBodyV3,
@@ -1459,5 +1459,272 @@ describe('connectRelay with standaloneIdentity', () => {
 				handler: async () => ({ ok: true }),
 			}),
 		).toThrow(/clientId and clientSecret, or a standaloneIdentity controller/);
+	});
+});
+
+describe('connectRelay default-manifest attach', () => {
+	let tempDirectory: string;
+	let identityFilePath: string;
+	let manifestPath: string;
+	let originalCwd: string;
+
+	beforeEach(async () => {
+		tempDirectory = await fs.mkdtemp(path.join(os.tmpdir(), 'connect-relay-manifest-'));
+		identityFilePath = path.join(tempDirectory, 'identity.json');
+		manifestPath = path.join(tempDirectory, 'privos-app.json');
+		originalCwd = process.cwd();
+	});
+
+	afterEach(async () => {
+		process.chdir(originalCwd);
+		await fs.rm(tempDirectory, { recursive: true, force: true });
+	});
+
+	async function seedIdentity(trust: RuntimeDispatchTrustV3) {
+		const identity: StandaloneIdentityV2 = {
+			pairingVersion: 2,
+			relayUrl: 'https://hub.example',
+			clientId: 'client-1',
+			clientSecret: 'secret-1',
+			trust,
+			fingerprint: standaloneHubFingerprint(trust.hubKid),
+			mcpAppId: trust.affinity.mcpAppId,
+			pairedAt: Date.now(),
+		};
+		await saveStandaloneIdentity(identity, { filePath: identityFilePath });
+		return loadStandaloneIdentity({ filePath: identityFilePath });
+	}
+
+	// Builds a signed `initialize` runtime-dispatch-v3 envelope (`authorizationContext:
+	// 'workspace'`, no room fields needed) for the given trust/key/clock. Reused for
+	// both the standaloneIdentity path (real clock) and the static-trust path (fixed
+	// clock, like the file's other `runtimeDispatchV3` fixtures).
+	function signedInitializeEnvelope(input: {
+		trust: RuntimeDispatchTrustV3;
+		privateKey: crypto.KeyObject;
+		now: number;
+	}): Record<string, unknown> {
+		const { trust, privateKey, now } = input;
+		const logicalRpc = { jsonrpc: '2.0', id: 1, method: 'initialize', params: {} };
+		const payload = {
+			protocolVersion: 3,
+			type: 'hub-runtime-dispatch-assertion',
+			iss: `hub:${trust.affinity.deploymentId}`,
+			aud: `mcp-runtime:${trust.affinity.mcpAppId}`,
+			jti: crypto.randomUUID(),
+			nonce: crypto.randomBytes(24).toString('base64url'),
+			iat: now,
+			exp: now + 30,
+			...trust.affinity,
+			authorizationContext: 'workspace' as const,
+			htm: 'POST',
+			htu: '/mcp',
+			bodyDigest: sha256RuntimeDispatchBodyV3(logicalRpc),
+		};
+		const encodedHeader = Buffer.from(canonical({
+			alg: 'ES256',
+			kid: trust.hubKid,
+			privos_protocol: 3,
+			typ: 'privos-hub-runtime-dispatch+jws',
+		})).toString('base64url');
+		const encodedPayload = Buffer.from(canonical(payload)).toString('base64url');
+		const signature = crypto.sign('sha256', Buffer.from(`${encodedHeader}.${encodedPayload}`, 'ascii'), {
+			key: privateKey,
+			dsaEncoding: 'ieee-p1363',
+		}).toString('base64url');
+		const assertion = `${encodedHeader}.${encodedPayload}.${signature}`;
+		return {
+			...logicalRpc,
+			params: {
+				_meta: {
+					privosAuthorization: { assertion, runtimeInstallationId: trust.affinity.runtimeInstallationId },
+				},
+			},
+		};
+	}
+
+	async function initializeOver(ws: FakeWebSocket, envelope: Record<string, unknown>): Promise<{ serverInfo: Record<string, unknown> }> {
+		ws.sent.splice(0);
+		ws.emit('message', Buffer.from(JSON.stringify(envelope)));
+		await vi.waitFor(() => expect(ws.sent.length).toBe(1));
+		return JSON.parse(ws.sent[0]!).result;
+	}
+
+	it('reads privos-app.json once at connect and echoes it on every initialize without re-reading', async () => {
+		const { privateKey, trust } = trustFixture({ mcpAppId: descriptor.id });
+		const loaded = await seedIdentity(trust);
+		const controller = createStandaloneRelayIdentityController(loaded);
+		const manifestV1 = { schemaVersion: 3, name: descriptor.id, version: '1.0.0' };
+		await fs.writeFile(manifestPath, JSON.stringify(manifestV1));
+		process.chdir(tempDirectory);
+
+		FakeWebSocket.instances = [];
+		const handle = connectRelay({
+			privosUrl: 'https://hub.example',
+			standaloneIdentity: controller,
+			descriptor,
+			handler: async () => ({ ok: true }),
+			fetchImpl: (async () => ({ ok: true, json: async () => ({ access_token: 'tok' }) })) as unknown as typeof fetch,
+			WebSocketImpl: FakeWebSocket as unknown as typeof import('ws').default,
+		});
+		await handle.whenConnected();
+		const ws = FakeWebSocket.instances[0]!;
+
+		const firstResult = await initializeOver(
+			ws,
+			signedInitializeEnvelope({ trust, privateKey, now: Math.floor(Date.now() / 1000) }),
+		);
+		expect(firstResult.serverInfo.manifest).toEqual(manifestV1);
+		expect(firstResult.serverInfo.manifestError).toBeUndefined();
+
+		// The file changes on disk after connect; a second `initialize` must answer
+		// from the descriptor captured once at connect, never re-reading the file.
+		await fs.writeFile(manifestPath, JSON.stringify({ ...manifestV1, version: '2.0.0' }));
+		const secondResult = await initializeOver(
+			ws,
+			signedInitializeEnvelope({ trust, privateKey, now: Math.floor(Date.now() / 1000) }),
+		);
+		expect(secondResult.serverInfo.manifest).toEqual(manifestV1);
+
+		await handle.stop();
+	});
+
+	it('sets serverInfo.manifestError and logs the path when privos-app.json is missing', async () => {
+		const { privateKey, trust } = trustFixture({ mcpAppId: descriptor.id });
+		const loaded = await seedIdentity(trust);
+		const controller = createStandaloneRelayIdentityController(loaded);
+		process.chdir(tempDirectory); // no privos-app.json written
+		// `process.chdir` resolves through macOS's /var → /private/var symlink, so the
+		// path the SDK logs (built from `process.cwd()` post-chdir) differs from the
+		// raw `os.tmpdir()`-derived `manifestPath` by that prefix; assert against the
+		// same resolution the implementation uses.
+		const resolvedManifestPath = path.resolve(process.cwd(), 'privos-app.json');
+		const logger = vi.fn();
+
+		FakeWebSocket.instances = [];
+		const handle = connectRelay({
+			privosUrl: 'https://hub.example',
+			standaloneIdentity: controller,
+			descriptor,
+			handler: async () => ({ ok: true }),
+			logger,
+			fetchImpl: (async () => ({ ok: true, json: async () => ({ access_token: 'tok' }) })) as unknown as typeof fetch,
+			WebSocketImpl: FakeWebSocket as unknown as typeof import('ws').default,
+		});
+		await handle.whenConnected();
+		const ws = FakeWebSocket.instances[0]!;
+
+		const result = await initializeOver(
+			ws,
+			signedInitializeEnvelope({ trust, privateKey, now: Math.floor(Date.now() / 1000) }),
+		);
+		expect(result.serverInfo.manifest).toBeUndefined();
+		expect(result.serverInfo.manifestError).toBe('resolve_failed');
+		expect(logger).toHaveBeenCalledWith(
+			'relay.manifest_resolve_failed',
+			expect.objectContaining({ path: resolvedManifestPath }),
+		);
+
+		await handle.stop();
+	});
+
+	it('never reads privos-app.json without a standaloneIdentity controller', async () => {
+		const pair = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
+		const publicJwk = pair.publicKey.export({ format: 'jwk' }) as { crv: string; kty: string; x: string; y: string };
+		const hubKid = crypto.createHash('sha256').update(canonical(publicJwk), 'utf8').digest('base64url');
+		const { trust } = trustFixture({ mcpAppId: descriptor.id });
+		const staticTrust: RuntimeDispatchTrustV3 = { hubKid, hubPublicJwk: publicJwk, affinity: trust.affinity };
+		const now = 2_000_000_000;
+
+		await fs.writeFile(manifestPath, JSON.stringify({ schemaVersion: 3, name: descriptor.id, version: '9.9.9' }));
+		process.chdir(tempDirectory);
+
+		FakeWebSocket.instances = [];
+		const handle = connectRelay({
+			privosUrl: 'https://hub.example',
+			clientId: 'cid',
+			clientSecret: 'sec',
+			descriptor,
+			runtimeDispatchV3: {
+				mode: 'required',
+				trust: staticTrust,
+				now: () => now,
+				replayConsumer: new BoundedRuntimeDispatchReplayConsumerV3(),
+			},
+			handler: async () => ({ ok: true }),
+			fetchImpl: (async () => ({ ok: true, json: async () => ({ access_token: 'tok' }) })) as unknown as typeof fetch,
+			WebSocketImpl: FakeWebSocket as unknown as typeof import('ws').default,
+		});
+		await handle.whenConnected();
+		const ws = FakeWebSocket.instances[0]!;
+
+		const result = await initializeOver(
+			ws,
+			signedInitializeEnvelope({ trust: staticTrust, privateKey: pair.privateKey, now }),
+		);
+		expect(result.serverInfo.manifest).toBeUndefined();
+		expect(result.serverInfo.manifestError).toBeUndefined();
+
+		await handle.stop();
+	});
+
+	it('never overrides an explicit descriptor.manifest with the file on disk', async () => {
+		const { privateKey, trust } = trustFixture({ mcpAppId: descriptor.id });
+		const loaded = await seedIdentity(trust);
+		const controller = createStandaloneRelayIdentityController(loaded);
+		const explicitManifest = { schemaVersion: 3, name: descriptor.id, version: 'explicit-1.0.0' };
+		await fs.writeFile(manifestPath, JSON.stringify({ schemaVersion: 3, name: descriptor.id, version: 'on-disk-9.9.9' }));
+		process.chdir(tempDirectory);
+
+		FakeWebSocket.instances = [];
+		const handle = connectRelay({
+			privosUrl: 'https://hub.example',
+			standaloneIdentity: controller,
+			descriptor: { ...descriptor, manifest: explicitManifest },
+			handler: async () => ({ ok: true }),
+			fetchImpl: (async () => ({ ok: true, json: async () => ({ access_token: 'tok' }) })) as unknown as typeof fetch,
+			WebSocketImpl: FakeWebSocket as unknown as typeof import('ws').default,
+		});
+		await handle.whenConnected();
+		const ws = FakeWebSocket.instances[0]!;
+
+		const result = await initializeOver(
+			ws,
+			signedInitializeEnvelope({ trust, privateKey, now: Math.floor(Date.now() / 1000) }),
+		);
+		expect(result.serverInfo.manifest).toEqual(explicitManifest);
+
+		await handle.stop();
+	});
+
+	it('leaves a caller-supplied opts.runtime untouched (no manifest attach)', async () => {
+		const { privateKey, trust } = trustFixture({ mcpAppId: descriptor.id });
+		const loaded = await seedIdentity(trust);
+		const controller = createStandaloneRelayIdentityController(loaded);
+		await fs.writeFile(manifestPath, JSON.stringify({ schemaVersion: 3, name: descriptor.id, version: '1.0.0' }));
+		process.chdir(tempDirectory);
+		const runtime = new AppServerRuntime({ descriptor, handler: async () => ({ ok: true }) });
+
+		FakeWebSocket.instances = [];
+		const handle = connectRelay({
+			privosUrl: 'https://hub.example',
+			standaloneIdentity: controller,
+			descriptor,
+			runtime,
+			handler: async () => ({ ok: true }),
+			fetchImpl: (async () => ({ ok: true, json: async () => ({ access_token: 'tok' }) })) as unknown as typeof fetch,
+			WebSocketImpl: FakeWebSocket as unknown as typeof import('ws').default,
+		});
+		await handle.whenConnected();
+		const ws = FakeWebSocket.instances[0]!;
+
+		const result = await initializeOver(
+			ws,
+			signedInitializeEnvelope({ trust, privateKey, now: Math.floor(Date.now() / 1000) }),
+		);
+		expect(result.serverInfo.manifest).toBeUndefined();
+		expect(result.serverInfo.manifestError).toBeUndefined();
+
+		await handle.stop();
 	});
 });

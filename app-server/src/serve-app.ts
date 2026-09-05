@@ -154,7 +154,8 @@ function developmentHubOrigin(env: NodeJS.ProcessEnv): string | undefined {
 	return url && /^https?:\/\//.test(url) ? url.replace(/\/+$/, '') : undefined;
 }
 
-function defaultManifestResolver(): unknown {
+/** Exported for `relay-client.ts`'s `connectRelay` default-manifest attach step (internal reuse, not part of the public API surface — not re-exported from `index.ts`). */
+export function defaultManifestResolver(): unknown {
 	return JSON.parse(readFileSync(path.resolve(process.cwd(), 'privos-app.json'), 'utf8'));
 }
 

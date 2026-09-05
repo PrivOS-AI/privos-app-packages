@@ -132,6 +132,14 @@ reference file store fails closed unless single-process mode is explicitly
 selected. Multiple processes or replicas require a shared transactional
 `PublisherRuntimeTrustDurableStoreV3` implementation.
 
+## Changing privos-app.json after pairing
+
+Edit `privos-app.json` and restart — the server sets `manifest` on the
+descriptor it passes to `connectRelay` (`src/server.ts:222`), so app-server
+echoes the loaded manifest and the Hub's Refresh detects the change. Re-pairing
+a live app is refused; use Hub Admin → Apps → your app → Settings → Refresh
+to review and approve the update instead.
+
 ## Publish to PrivOS Marketplace
 
 Keep `privos-app.json` and `Dockerfile` at the project root. Package the project

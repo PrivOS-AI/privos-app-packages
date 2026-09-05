@@ -41,6 +41,14 @@ export interface AppDescriptor {
 	 * re-pair. Standalone-production `serveApp` fills this from `resolveManifest`.
 	 */
 	manifest?: Record<string, unknown>;
+	/**
+	 * Set instead of `manifest` when the SDK's own attempt to resolve the
+	 * published manifest failed (e.g. `connectRelay`'s default `privos-app.json`
+	 * read). Echoed verbatim as `serverInfo.manifestError` on `initialize` so a
+	 * Hub can tell "old SDK, never echoes" apart from "this SDK tried and the
+	 * file is missing/invalid" instead of guessing from a version number alone.
+	 */
+	manifestError?: string;
 }
 
 const RESERVED_CAPABILITY_KEYS = new Set(['tools', 'extensions']);
@@ -121,6 +129,7 @@ export function buildInitializeResult(
 	if (descriptor.scopes?.length) serverInfo.scopes = [...descriptor.scopes];
 	if (descriptor.permissions?.length) serverInfo.permissions = descriptor.permissions.map((permission) => ({ ...permission }));
 	if (descriptor.manifest) serverInfo.manifest = structuredClone(descriptor.manifest);
+	else if (descriptor.manifestError) serverInfo.manifestError = descriptor.manifestError;
 
 	return {
 		protocolVersion: MCP_PROTOCOL_VERSION,

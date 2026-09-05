@@ -1,3 +1,5 @@
+import path from 'node:path';
+
 import WebSocket, { type RawData } from 'ws';
 
 import {
@@ -50,6 +52,7 @@ import {
 	type StandalonePendingIdentityV2,
 } from './standalone-identity.js';
 import { lintManifest, sha256CanonicalJson } from '../manifest-tools.js';
+import { defaultManifestResolver } from '../serve-app.js';
 import {
 	assertRuntimeDispatchTrustConfigurationV3,
 	extractRuntimeDispatchRelayEnvelopeV3,
@@ -889,6 +892,35 @@ export async function pairFromDescriptor(
 }
 
 /**
+ * Read `${cwd}/privos-app.json` ONCE, synchronously, and return a descriptor
+ * with `manifest` set — or, on any read/parse failure, `manifestError:
+ * 'resolve_failed'` instead. Never throws: a hand-wired standalone app that
+ * omits `descriptor.manifest` still gets a working `connectRelay()` and the
+ * failure is only observable via the logger + the echoed `manifestError`
+ * (never a connect/dispatch error). Reused from `serveApp`'s own default so
+ * both surfaces resolve the same file the same way.
+ */
+function attachManifestFromCwd(
+	descriptor: AppDescriptor,
+	logger?: AppServerRuntimeOptions['logger'],
+): AppDescriptor {
+	const manifestPath = path.resolve(process.cwd(), 'privos-app.json');
+	try {
+		const manifest = defaultManifestResolver();
+		if (manifest && typeof manifest === 'object' && !Array.isArray(manifest)) {
+			return { ...descriptor, manifest: manifest as Record<string, unknown> };
+		}
+		throw new Error('privos-app.json did not resolve to a JSON object');
+	} catch (error) {
+		logger?.('relay.manifest_resolve_failed', {
+			path: manifestPath,
+			error: error instanceof Error ? error.message : String(error),
+		});
+		return { ...descriptor, manifestError: 'resolve_failed' };
+	}
+}
+
+/**
  * Connect to PrivOS relay WebSocket with exponential backoff, token refresh,
  * single reconnect timer, and explicit stop().
  */
@@ -944,10 +976,24 @@ export function connectRelay(opts: RelayClientOptions): RelayHandle {
 		? extractRelayUserTokenCredential
 		: opts.extractCallerCredential;
 
+	// Default-manifest attach: only for a caller-constructed runtime (opts.runtime
+	// unset), only for a plain-object descriptor without its own `manifest` (a
+	// function descriptor or an explicit `manifest` sets it themselves), and
+	// only under standalone identity — the mode `connectRelay`'s own SDK version
+	// gate targets. Runs AFTER `manifestAppId` above already read the original
+	// descriptor, so audience pinning is unaffected.
+	const effectiveDescriptor: RelayClientOptions['descriptor'] =
+		!opts.runtime &&
+		opts.standaloneIdentity &&
+		typeof opts.descriptor !== 'function' &&
+		!opts.descriptor.manifest
+			? attachManifestFromCwd(opts.descriptor, opts.logger)
+			: opts.descriptor;
+
 	const runtime =
 		opts.runtime ??
 		new AppServerRuntime({
-			descriptor: opts.descriptor,
+			descriptor: effectiveDescriptor,
 			handler: opts.handler,
 			ui: opts.ui,
 			auth: effectiveAuth,
