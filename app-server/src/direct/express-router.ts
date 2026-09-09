@@ -31,6 +31,7 @@ import { getWorkloadIdentityClient, type WorkloadIdentityClient } from '../workl
 import { registerManagedIngressRoomAuthority } from '../workload/managed-ingress-authority.js';
 import {
 	isUnsignedRuntimeReadinessRpcV3,
+	dispatchRejectionCode,
 	verifyClusterDispatchAssertionV3,
 	verifyDispatchAssertion,
 	verifyRuntimeDispatchAssertionV3,
@@ -199,7 +200,8 @@ async function handleMcpPost(
 		...rawHeaderValues(req, 'x-privos-mcp-authorization-binding-id'),
 	];
 	if (unsupportedRuntimeAffinityHeaders.length > 0) {
-		denyDispatch(res, requestId);
+		// Relay-only affinity headers have no meaning on the direct surface.
+		denyDispatch(res, requestId, 'dispatch_assertion_unexpected');
 		return;
 	}
 	if (
@@ -207,7 +209,7 @@ async function handleMcpPost(
 		runtimeAssertionHeaders.length > 1 ||
 		(managedAssertionHeaders.length > 0 && runtimeAssertionHeaders.length > 0)
 	) {
-		denyDispatch(res, requestId);
+		denyDispatch(res, requestId, 'dispatch_assertion_ambiguous');
 		return;
 	}
 	if (options.runtimeDispatchV3) {
@@ -226,13 +228,13 @@ async function handleMcpPost(
 					security: options.runtimeDispatchV3,
 				});
 			}
-		} catch {
-			denyDispatch(res, requestId);
+		} catch (error) {
+			denyDispatch(res, requestId, error);
 			return;
 		}
 	} else {
 		if (runtimeAssertionHeaders.length > 0) {
-			denyDispatch(res, requestId);
+			denyDispatch(res, requestId, 'dispatch_assertion_unexpected');
 			return;
 		}
 		const workloadClient = options.workloadIdentityClient ?? getWorkloadIdentityClient();
@@ -251,12 +253,12 @@ async function handleMcpPost(
 				} else {
 					verifyDispatchAssertion({ compact: assertion, body, context: brokerContext });
 				}
-			} catch {
-				denyDispatch(res, requestId);
+			} catch (error) {
+				denyDispatch(res, requestId, error);
 				return;
 			}
 		} else if (managedAssertionHeaders.length > 0) {
-			denyDispatch(res, requestId);
+			denyDispatch(res, requestId, 'dispatch_assertion_unexpected');
 			return;
 		}
 	}
@@ -273,7 +275,7 @@ async function handleMcpPost(
 				{ headers: req.headers },
 			);
 	if (managedWorkloadClient && credentialResolution.kind === 'error') {
-		denyDispatch(res, requestId);
+		denyDispatch(res, requestId, 'dispatch_assertion_ambiguous');
 		return;
 	}
 
@@ -304,7 +306,7 @@ async function handleMcpPost(
 		}
 	} catch (error) {
 		if (runtimeAuthorization && error instanceof Error && error.message === 'dispatch_assertion_binding_mismatch') {
-			denyDispatch(res, requestId);
+			denyDispatch(res, requestId, error);
 			return;
 		}
 		throw error;
@@ -384,10 +386,15 @@ function withManagedDispatchActor(
 	};
 }
 
-function denyDispatch(res: Response, requestId: string | number | null | undefined): void {
+function denyDispatch(res: Response, requestId: string | number | null | undefined, reason: unknown = 'dispatch_assertion_invalid'): void {
+	// The direct surface is unauthenticated: the pinned-trust comparison runs
+	// before the signature check, so a distinct trust code would let a forged,
+	// unsigned assertion confirm the affinity tuple field by field. Only the
+	// relay (Hub-authenticated) surface reports DISPATCH_TRUST_INVALID.
+	const code = dispatchRejectionCode(reason);
 	res.status(403).json(
 		errorResponse(requestId ?? null, jsonRpcError(INVALID_REQUEST, 'Authenticated private dispatch required', {
-			code: 'DISPATCH_ASSERTION_INVALID',
+			code: code === 'DISPATCH_TRUST_INVALID' ? 'DISPATCH_ASSERTION_INVALID' : code,
 		})),
 	);
 }

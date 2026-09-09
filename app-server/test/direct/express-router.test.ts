@@ -3,6 +3,7 @@ import express from 'express';
 import request from 'supertest';
 import { describe, expect, it, vi } from 'vitest';
 
+import type { RuntimeDispatchTrustV3 } from '../../src/workload/dispatch-assertion.js';
 import { createDirectRouter } from '../../src/direct/express-router.js';
 import type { AppDescriptor } from '../../src/app-descriptor.js';
 import {
@@ -225,36 +226,54 @@ describe('createDirectRouter', () => {
 			runtimeDispatchV3: signed.security,
 			handler: async () => ({ ok: true }),
 		}));
-		for (const execute of [
-			() => request(app).post('/mcp').send(body),
-			() => request(app).post('/mcp').set('X-PrivOS-Dispatch-Assertion', signed.compact).send(body),
-			() => request(app).post('/mcp')
+		// Every rejection keeps the same message; only `data.code` names the reason.
+		for (const [execute, code] of [
+			[() => request(app).post('/mcp').send(body), 'DISPATCH_ASSERTION_MISSING'],
+			[() => request(app).post('/mcp').set('X-PrivOS-Dispatch-Assertion', signed.compact).send(body), 'DISPATCH_ASSERTION_AMBIGUOUS'],
+			[() => request(app).post('/mcp')
 				.set('X-PrivOS-Dispatch-Assertion', signed.compact)
 				.set('X-PrivOS-MCP-Dispatch-Assertion', signed.compact)
-				.send(body),
-			() => request(app).post('/mcp')
+				.send(body), 'DISPATCH_ASSERTION_AMBIGUOUS'],
+			[() => request(app).post('/mcp')
 				.set('X-PrivOS-MCP-Dispatch-Assertion', [signed.compact, signed.compact] as unknown as string)
-				.send(body),
-			() => request(app).post('/mcp')
+				.send(body), 'DISPATCH_ASSERTION_AMBIGUOUS'],
+			[() => request(app).post('/mcp')
 				.set('X-PrivOS-MCP-Dispatch-Assertion', signed.compact)
 				.set('X-PrivOS-MCP-Runtime-Installation-Id', 'installation-direct')
-				.send(body),
-			() => request(app).post('/mcp')
+				.send(body), 'DISPATCH_ASSERTION_UNEXPECTED'],
+			[() => request(app).post('/mcp')
 				.set('X-PrivOS-MCP-Dispatch-Assertion', signed.compact)
 				.set('X-PrivOS-MCP-Authorization-Binding-Id', 'binding-direct')
-				.send(body),
-		]) {
+				.send(body), 'DISPATCH_ASSERTION_UNEXPECTED'],
+		] as const) {
 			const response = await execute().expect(403);
-			expect(response.body.error.data.code).toBe('DISPATCH_ASSERTION_INVALID');
+			expect(response.body.error.message).toBe('Authenticated private dispatch required');
+			expect(response.body.error.data.code).toBe(code);
 		}
 
 		const unconfigured = express();
 		unconfigured.use(createDirectRouter({ descriptor, handler: async () => ({ ok: true }) }));
-		await request(unconfigured)
+		const unexpected = await request(unconfigured)
 			.post('/mcp')
 			.set('X-PrivOS-MCP-Dispatch-Assertion', signed.compact)
 			.send(body)
 			.expect(403);
+		expect(unexpected.body.error.data.code).toBe('DISPATCH_ASSERTION_UNEXPECTED');
+	});
+
+	it('never reveals a pinned-trust mismatch on the unauthenticated direct surface (no pre-signature oracle)', async () => {
+		const body = { jsonrpc: '2.0', id: 9, method: 'tools/call', params: { name: 'demo.ping', arguments: {} } };
+		const signed = signedRuntimeDispatch(body);
+		const pinned = signed.security.trust as RuntimeDispatchTrustV3;
+		for (const trust of [
+			{ ...pinned, hubKid: 'k'.repeat(43) },
+			{ ...pinned, affinity: { ...pinned.affinity, manifestDigest: `sha256:${'9'.repeat(64)}` } },
+		]) {
+			const app = express();
+			app.use(createDirectRouter({ descriptor, runtimeDispatchV3: { ...signed.security, trust }, handler: async () => ({ ok: true }) }));
+			const response = await request(app).post('/mcp').set('X-PrivOS-MCP-Dispatch-Assertion', signed.compact).send(body).expect(403);
+			expect(response.body.error.data.code).toBe('DISPATCH_ASSERTION_INVALID');
+		}
 	});
 
 	it('permits only exact explicitly configured unsigned Hub discovery messages', async () => {
@@ -290,7 +309,7 @@ describe('createDirectRouter', () => {
 		];
 		for (const body of denied) {
 			const response = await request(app).post('/mcp').send(body).expect(403);
-			expect(response.body.error.data.code).toBe('DISPATCH_ASSERTION_INVALID');
+			expect(response.body.error.data.code).toBe('DISPATCH_ASSERTION_MISSING');
 		}
 	});
 
@@ -308,17 +327,17 @@ describe('createDirectRouter', () => {
 		const readiness = {
 			jsonrpc: '2.0', id: 2, method: 'tools/list', params: {},
 		};
-		for (const assertion of [
-			'',
-			'not-a-compact-jws',
-			[seed.compact, seed.compact] as unknown as string,
-		]) {
+		for (const [assertion, code] of [
+			['', 'DISPATCH_ASSERTION_INVALID'],
+			['not-a-compact-jws', 'DISPATCH_ASSERTION_INVALID'],
+			[[seed.compact, seed.compact] as unknown as string, 'DISPATCH_ASSERTION_AMBIGUOUS'],
+		] as const) {
 			const response = await request(app)
 				.post('/mcp')
 				.set('X-PrivOS-MCP-Dispatch-Assertion', assertion)
 				.send(readiness)
 				.expect(403);
-			expect(response.body.error.data.code).toBe('DISPATCH_ASSERTION_INVALID');
+			expect(response.body.error.data.code).toBe(code);
 		}
 	});
 
@@ -329,7 +348,7 @@ describe('createDirectRouter', () => {
 			.post('/mcp')
 			.send({ jsonrpc: '2.0', id: 1, method: 'tools/list' })
 			.expect(403);
-		expect(response.body.error.data.code).toBe('DISPATCH_ASSERTION_INVALID');
+		expect(response.body.error.data.code).toBe('DISPATCH_ASSERTION_MISSING');
 	});
 
 	it('rejects ambiguous v3/legacy configuration and non-canonical v3 MCP paths', () => {

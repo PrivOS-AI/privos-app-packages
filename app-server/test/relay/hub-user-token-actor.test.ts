@@ -618,7 +618,7 @@ describe('connectRelay automatic hub user-token actor wiring (standaloneIdentity
 		const ws = FakeWebSocket.instances[0]!;
 		ws.emit('message', Buffer.from(JSON.stringify(envelope)));
 		await vi.waitFor(() => expect(ws.sent.length).toBe(1));
-		expect(JSON.parse(ws.sent[0]!).error.data.code).toBe('DISPATCH_ASSERTION_INVALID');
+		expect(JSON.parse(ws.sent[0]!).error.data.code).toBe('DISPATCH_ASSERTION_BINDING_MISMATCH');
 		expect(handler).not.toHaveBeenCalled();
 		await handle.stop();
 	});

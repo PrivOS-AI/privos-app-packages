@@ -32,6 +32,7 @@ import { createAgentBotHubClient } from '../../src/relay/hub-rest-as-bot-client.
 import {
 	createStandaloneRelayIdentityController,
 	STANDALONE_AGENT_BOT_CREDENTIAL_METHOD,
+	STANDALONE_TRUST_ROTATE_METHOD,
 } from '../../src/relay/standalone-control.js';
 import {
 	loadStandaloneIdentity,
@@ -209,6 +210,76 @@ describe('agent-bot credential delivery over the standalone control channel', ()
 		expect(persisted?.deliveryVersion).toBe(2);
 		expect(tokenFingerprint(persisted?.token ?? '')).toBe(tokenFingerprint('test-overlap-v2'));
 		expect(tokenFingerprint(readAgentBotCredential()?.token ?? '')).toBe(tokenFingerprint('test-overlap-v2'));
+	});
+
+	it('serializes a trust rotate against an overlapping credential delivery so neither identity-file write is lost', async () => {
+		const { privateKey, trust } = keyPairAndTrust();
+		await saveStandaloneIdentity(identityFixture(trust), { filePath });
+		const controller = createStandaloneRelayIdentityController(loadStandaloneIdentity({ filePath }), { now: () => 2_000_000_000 });
+		const rotatedDigest = `sha256:${'e'.repeat(64)}`;
+		const rotatedTrust: RuntimeDispatchTrustV3 = { ...trust, affinity: { ...trust.affinity, manifestDigest: rotatedDigest } };
+		let releaseTrustPersistence!: () => void;
+		const trustPersistenceGate = new Promise<void>((resolve) => {
+			releaseTrustPersistence = resolve;
+		});
+		let signalTrustPersistence!: () => void;
+		const trustPersistenceStarted = new Promise<void>((resolve) => {
+			signalTrustPersistence = resolve;
+		});
+		let credentialPersistenceStarted = false;
+
+		const controlledRotate: typeof rotateStandaloneIdentity = async (mutate, rotateOptions) => {
+			const next = mutate(loadStandaloneIdentity({ filePath: rotateOptions?.filePath }).identity);
+			if (next.agentBotCredential) credentialPersistenceStarted = true;
+			else if (next.trust.affinity.manifestDigest === rotatedDigest) {
+				signalTrustPersistence();
+				await trustPersistenceGate;
+			}
+			await fs.writeFile(filePath, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
+			await fs.chmod(filePath, 0o600);
+			return loadStandaloneIdentity({ filePath });
+		};
+		controlledIdentityRotation.handler = controlledRotate as unknown as (...args: never[]) => Promise<never>;
+
+		const trustRotate = controller.handleControlNotification(STANDALONE_TRUST_ROTATE_METHOD, {
+			assertion: signControlAssertion({
+				privateKey,
+				kid: trust.hubKid,
+				type: 'standalone-trust-rotate',
+				deploymentId: trust.affinity.deploymentId,
+				mcpAppId: trust.affinity.mcpAppId,
+				data: { trust: rotatedTrust },
+				now: 2_000_000_000,
+			}),
+		});
+		await trustPersistenceStarted;
+		const credential = controller.handleControlNotification(STANDALONE_AGENT_BOT_CREDENTIAL_METHOD, {
+			assertion: signControlAssertion({
+				privateKey,
+				kid: trust.hubKid,
+				type: 'standalone-agent-bot-credential',
+				deploymentId: trust.affinity.deploymentId,
+				mcpAppId: trust.affinity.mcpAppId,
+				data: { botUserId: 'bot-user-99', token: 'test-lock-v1', runtimeInstallationId: trust.affinity.runtimeInstallationId, deliveryVersion: 1 },
+				now: 2_000_000_000,
+			}),
+		});
+		try {
+			// The credential write must wait for the trust rotate's rename, or it would
+			// re-persist the trust it read before the rotation — the lost-update shape.
+			expect(credentialPersistenceStarted).toBe(false);
+		} finally {
+			releaseTrustPersistence();
+			await Promise.allSettled([trustRotate, credential]);
+			controlledIdentityRotation.handler = undefined;
+		}
+
+		expect(await trustRotate).toBe('handled');
+		expect(await credential).toMatchObject({ deliveryVersion: 1 });
+		const persisted = loadStandaloneIdentity({ filePath }).identity;
+		expect(persisted.trust.affinity.manifestDigest).toBe(rotatedDigest);
+		expect(persisted.agentBotCredential?.deliveryVersion).toBe(1);
+		expect(controller.getTrust().affinity.manifestDigest).toBe(rotatedDigest);
 	});
 
 	it('continues queued credential delivery after a persistence failure', async () => {

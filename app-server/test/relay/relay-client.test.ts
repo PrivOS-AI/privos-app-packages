@@ -11,6 +11,7 @@ import {
 	createStandaloneRelayIdentityController,
 	STANDALONE_AGENT_BOT_CREDENTIAL_METHOD,
 	STANDALONE_SECRET_ROTATE_METHOD,
+	STANDALONE_TRUST_ROTATE_METHOD,
 } from '../../src/relay/standalone-control.js';
 import {
 	loadStandaloneIdentity,
@@ -320,11 +321,17 @@ describe('connectRelay', () => {
 		(tampered.params as { arguments: { message: string } }).arguments.message = 'tampered';
 		const topLevelCollision = { ...signed.envelope, _meta: { privosUser: { userId: 'collision' } } };
 
-		for (const message of [wrongRuntime, wrongBinding, tampered, topLevelCollision]) {
+		for (const [message, code] of [
+			[wrongRuntime, 'DISPATCH_ASSERTION_BINDING_MISMATCH'],
+			[wrongBinding, 'DISPATCH_ASSERTION_BINDING_MISMATCH'],
+			[tampered, 'DISPATCH_ASSERTION_BODY_MISMATCH'],
+			[topLevelCollision, 'DISPATCH_ASSERTION_AMBIGUOUS'],
+		] as const) {
 			ws.emit('message', Buffer.from(JSON.stringify(message)));
 			await vi.waitFor(() => expect(ws.sent.length).toBeGreaterThanOrEqual(1));
 			const response = JSON.parse(ws.sent.at(-1)!);
-			expect(response.error.data.code).toBe('DISPATCH_ASSERTION_INVALID');
+			expect(response.error.message).toBe('Authenticated private dispatch required');
+			expect(response.error.data.code).toBe(code);
 			ws.sent.splice(0);
 		}
 		expect(handler).not.toHaveBeenCalled();
@@ -337,7 +344,7 @@ describe('connectRelay', () => {
 
 		ws.emit('message', Buffer.from(JSON.stringify(signed.envelope)));
 		await vi.waitFor(() => expect(ws.sent.length).toBe(1));
-		expect(JSON.parse(ws.sent[0]!).error.data.code).toBe('DISPATCH_ASSERTION_INVALID');
+		expect(JSON.parse(ws.sent[0]!).error.data.code).toBe('DISPATCH_ASSERTION_REPLAYED');
 		expect(handler).toHaveBeenCalledTimes(1);
 		await handle.stop();
 	});
@@ -350,6 +357,7 @@ describe('connectRelay', () => {
 			ok: true,
 			json: async () => ({ access_token: 'tok' }),
 		}));
+		const logs: Array<{ event: string; fields: Record<string, unknown> }> = [];
 		const handle = connectRelay({
 			privosUrl: 'http://hub.test',
 			clientId: 'cid',
@@ -360,6 +368,7 @@ describe('connectRelay', () => {
 				unsignedReadiness: 'initialize-and-tools-list',
 			},
 			handler,
+			logger: (event, fields) => logs.push({ event, fields }),
 			fetchImpl: fetchImpl as unknown as typeof fetch,
 			WebSocketImpl: FakeWebSocket as unknown as typeof import('ws').default,
 		});
@@ -381,9 +390,82 @@ describe('connectRelay', () => {
 		for (const body of directOnlyBodies) {
 			ws.emit('message', Buffer.from(JSON.stringify(body)));
 			await vi.waitFor(() => expect(ws.sent.length).toBe(1));
-			expect(JSON.parse(ws.sent[0]!).error.data.code).toBe('DISPATCH_ASSERTION_INVALID');
+			expect(JSON.parse(ws.sent[0]!).error.data.code).toBe('DISPATCH_ASSERTION_MISSING');
 			ws.sent.splice(0);
 		}
+		expect(handler).not.toHaveBeenCalled();
+		// The gate runs before `relay.rpc.inbound`, so the rejection must leave its own log line.
+		const rejected = logs.filter((entry) => entry.event === 'relay.rpc.rejected');
+		expect(rejected.map((entry) => entry.fields.method)).toEqual(['initialize', 'notifications/initialized', 'tools/list']);
+		expect(rejected.every((entry) => entry.fields.reason === 'dispatch_assertion_missing')).toBe(true);
+		expect(rejected[0]!.fields.requestId).toBe(1);
+		expect(logs.some((entry) => entry.event === 'relay.rpc.inbound')).toBe(false);
+		await handle.stop();
+	});
+
+	it('reports DISPATCH_TRUST_INVALID when the app pins a previous approval (stale trust affinity)', async () => {
+		FakeWebSocket.instances = [];
+		const signed = signedRelayDispatch();
+		const pinned = signed.security.trust as RuntimeDispatchTrustV3;
+		const staleTrust: RuntimeDispatchTrustV3 = {
+			...pinned,
+			affinity: { ...pinned.affinity, manifestDigest: `sha256:${'9'.repeat(64)}`, runtimeApprovalReceiptHash: 'Z'.repeat(43) },
+		};
+		const handler = vi.fn(async () => ({ ok: true }));
+		const logs: Array<{ event: string; fields: Record<string, unknown> }> = [];
+		const fetchImpl = vi.fn(async () => ({ ok: true, json: async () => ({ access_token: 'tok' }) }));
+		const handle = connectRelay({
+			privosUrl: 'http://hub.test',
+			clientId: 'cid',
+			clientSecret: 'sec',
+			descriptor,
+			runtimeDispatchV3: { ...signed.security, trust: staleTrust },
+			handler,
+			logger: (event, fields) => logs.push({ event, fields }),
+			fetchImpl: fetchImpl as unknown as typeof fetch,
+			WebSocketImpl: FakeWebSocket as unknown as typeof import('ws').default,
+		});
+		await handle.whenConnected();
+		const ws = FakeWebSocket.instances[0]!;
+		ws.emit('message', Buffer.from(JSON.stringify(signed.envelope)));
+		await vi.waitFor(() => expect(ws.sent.length).toBe(1));
+		const response = JSON.parse(ws.sent[0]!);
+		expect(response.error.message).toBe('Authenticated private dispatch required');
+		expect(response.error.data.code).toBe('DISPATCH_TRUST_INVALID');
+		expect(logs.find((entry) => entry.event === 'relay.rpc.rejected')?.fields).toMatchObject({
+			method: 'tools/call',
+			requestId: 7,
+			reason: 'runtime_dispatch_trust_mismatch',
+		});
+		expect(handler).not.toHaveBeenCalled();
+		await handle.stop();
+	});
+
+	it('reports DISPATCH_TRUST_INVALID when the app pins a Hub key it never accepted (kid mismatch)', async () => {
+		FakeWebSocket.instances = [];
+		const signed = signedRelayDispatch();
+		const pinned = signed.security.trust as RuntimeDispatchTrustV3;
+		const coldTrust: RuntimeDispatchTrustV3 = { ...pinned, hubKid: 'k'.repeat(43) };
+		const handler = vi.fn(async () => ({ ok: true }));
+		const logs: Array<{ event: string; fields: Record<string, unknown> }> = [];
+		const fetchImpl = vi.fn(async () => ({ ok: true, json: async () => ({ access_token: 'tok' }) }));
+		const handle = connectRelay({
+			privosUrl: 'http://hub.test',
+			clientId: 'cid',
+			clientSecret: 'sec',
+			descriptor,
+			runtimeDispatchV3: { ...signed.security, trust: coldTrust },
+			handler,
+			logger: (event, fields) => logs.push({ event, fields }),
+			fetchImpl: fetchImpl as unknown as typeof fetch,
+			WebSocketImpl: FakeWebSocket as unknown as typeof import('ws').default,
+		});
+		await handle.whenConnected();
+		const ws = FakeWebSocket.instances[0]!;
+		ws.emit('message', Buffer.from(JSON.stringify(signed.envelope)));
+		await vi.waitFor(() => expect(ws.sent.length).toBe(1));
+		expect(JSON.parse(ws.sent[0]!).error.data.code).toBe('DISPATCH_TRUST_INVALID');
+		expect(logs.find((entry) => entry.event === 'relay.rpc.rejected')?.fields.reason).toBe('runtime_dispatch_trust_invalid');
 		expect(handler).not.toHaveBeenCalled();
 		await handle.stop();
 	});
@@ -409,7 +491,7 @@ describe('connectRelay', () => {
 		const ws = FakeWebSocket.instances[0]!;
 		ws.emit('message', Buffer.from(JSON.stringify(signed.envelope)));
 		await vi.waitFor(() => expect(ws.sent.length).toBe(1));
-		expect(JSON.parse(ws.sent[0]!).error.data.code).toBe('DISPATCH_ASSERTION_INVALID');
+		expect(JSON.parse(ws.sent[0]!).error.data.code).toBe('DISPATCH_ASSERTION_UNEXPECTED');
 		expect(handler).not.toHaveBeenCalled();
 		await handle.stop();
 	});
@@ -916,6 +998,7 @@ function signControlAssertion(input: {
 	mcpAppId: string;
 	data: unknown;
 	now: number;
+	exp?: number;
 }): string {
 	const header = { alg: 'ES256', kid: input.kid, privos_protocol: 3, typ: 'privos-hub-standalone-control+jws' };
 	const payload = {
@@ -926,7 +1009,7 @@ function signControlAssertion(input: {
 		jti: crypto.randomUUID(),
 		nonce: crypto.randomBytes(24).toString('base64url'),
 		iat: input.now,
-		exp: input.now + 30,
+		exp: input.exp ?? input.now + 30,
 		data: input.data,
 	};
 	const encodedHeader = Buffer.from(canonical(header)).toString('base64url');
@@ -1342,6 +1425,54 @@ describe('connectRelay with standaloneIdentity', () => {
 
 		await vi.waitFor(() => expect(controller.getCredentials().clientId).toBe('client-2'));
 		expect(handler).not.toHaveBeenCalled();
+		expect(ws.sent).toHaveLength(0);
+		await handle.stop();
+	});
+
+	it('logs the control error code when a signed control notification is refused (expired trust-rotate)', async () => {
+		const { privateKey, trust } = trustFixture();
+		const loaded = await seedIdentity(trust);
+		const now = 2_000_000_000;
+		const controller = createStandaloneRelayIdentityController(loaded, { now: () => now });
+
+		FakeWebSocket.instances = [];
+		const logs: Array<{ event: string; fields: Record<string, unknown> }> = [];
+		const fetchImpl = vi.fn(async () => ({ ok: true, json: async () => ({ access_token: 'tok' }) }));
+		const handle = connectRelay({
+			privosUrl: 'https://hub.example',
+			standaloneIdentity: controller,
+			descriptor,
+			handler: async () => ({ ok: true }),
+			logger: (event, fields) => logs.push({ event, fields }),
+			fetchImpl: fetchImpl as unknown as typeof fetch,
+			WebSocketImpl: FakeWebSocket as unknown as typeof import('ws').default,
+		});
+		await handle.whenConnected();
+		const ws = FakeWebSocket.instances[0]!;
+
+		const expired = signControlAssertion({
+			privateKey,
+			kid: trust.hubKid,
+			type: 'standalone-trust-rotate',
+			deploymentId: trust.affinity.deploymentId,
+			mcpAppId: trust.affinity.mcpAppId,
+			data: { trust },
+			now: now - 100,
+			exp: now - 70,
+		});
+		ws.emit(
+			'message',
+			Buffer.from(JSON.stringify({ jsonrpc: '2.0', method: STANDALONE_TRUST_ROTATE_METHOD, params: { assertion: expired } })),
+		);
+
+		await vi.waitFor(() => expect(logs.some((entry) => entry.event === 'relay.standalone_control.rejected')).toBe(true));
+		const rejected = logs.find((entry) => entry.event === 'relay.standalone_control.rejected')!;
+		expect(rejected.fields).toMatchObject({
+			method: STANDALONE_TRUST_ROTATE_METHOD,
+			name: 'StandaloneControlError',
+			code: 'standalone_control_assertion_time_invalid',
+		});
+		expect(controller.getTrust()).toEqual(trust);
 		expect(ws.sent).toHaveLength(0);
 		await handle.stop();
 	});

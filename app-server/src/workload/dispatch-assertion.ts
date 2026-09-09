@@ -482,18 +482,23 @@ function assertRuntimeDispatchTrustMatchesV3(
 	header: { kid: string },
 	payload: Record<string, unknown> & RuntimeDispatchCommonV3,
 ): void {
+	// Every failure here means the app's PINNED Hub trust disagrees with this
+	// dispatch (unusable trust, a Hub kid this app never accepted, or an affinity
+	// the app pinned from a previous approval). They share one wire code,
+	// DISPATCH_TRUST_INVALID, distinct from a relay-wrapper or room-binding
+	// mismatch, so the Hub can tell "redeliver trust" from "wrong binding".
 	try {
 		assertRuntimeDispatchTrustConfigurationV3(trust);
 	} catch {
-		throw new Error('dispatch_assertion_invalid');
+		throw new Error('runtime_dispatch_trust_invalid');
 	}
-	if (trust.hubKid !== header.kid) throw new Error('dispatch_assertion_invalid');
+	if (trust.hubKid !== header.kid) throw new Error('runtime_dispatch_trust_invalid');
 	if (
 		RUNTIME_DISPATCH_V3_AFFINITY_REQUIRED_KEYS.some((key) => trust.affinity[key] !== payload[key]) ||
 		RUNTIME_DISPATCH_V3_AFFINITY_OPTIONAL_KEYS.some((key) =>
 			trust.affinity[key] !== undefined && trust.affinity[key] !== payload[key])
 	) {
-		throw new Error('dispatch_assertion_binding_mismatch');
+		throw new Error('runtime_dispatch_trust_mismatch');
 	}
 }
 
@@ -944,3 +949,59 @@ export function verifyDispatchAssertion(input: {
 		...(actor ? { actor } : {}),
 	});
 }
+
+/** Reason-specific `error.data.code` returned with `Authenticated private dispatch required`. */
+export type DispatchRejectionCodeV3 =
+	| 'DISPATCH_ASSERTION_MISSING'
+	| 'DISPATCH_ASSERTION_INVALID'
+	| 'DISPATCH_ASSERTION_AMBIGUOUS'
+	| 'DISPATCH_ASSERTION_UNEXPECTED'
+	| 'DISPATCH_ASSERTION_REPLAYED'
+	| 'DISPATCH_ASSERTION_EXPIRED'
+	| 'DISPATCH_ASSERTION_BODY_MISMATCH'
+	| 'DISPATCH_ASSERTION_BINDING_MISMATCH'
+	| 'DISPATCH_TRUST_INVALID';
+
+const DISPATCH_REJECTION_CODES: Readonly<Record<string, DispatchRejectionCodeV3>> = Object.freeze({
+	dispatch_assertion_missing: 'DISPATCH_ASSERTION_MISSING',
+	dispatch_assertion_ambiguous: 'DISPATCH_ASSERTION_AMBIGUOUS',
+	// An assertion (or reserved metadata) arrived on a surface with no v3 receiver trust configured.
+	dispatch_assertion_unexpected: 'DISPATCH_ASSERTION_UNEXPECTED',
+	dispatch_assertion_replayed: 'DISPATCH_ASSERTION_REPLAYED',
+	dispatch_assertion_time_invalid: 'DISPATCH_ASSERTION_EXPIRED',
+	dispatch_assertion_body_mismatch: 'DISPATCH_ASSERTION_BODY_MISMATCH',
+	dispatch_assertion_binding_mismatch: 'DISPATCH_ASSERTION_BINDING_MISMATCH',
+	// The app's pinned Hub trust (key or affinity) does not match this dispatch — redeliver trust.
+	runtime_dispatch_trust_invalid: 'DISPATCH_TRUST_INVALID',
+	runtime_dispatch_trust_mismatch: 'DISPATCH_TRUST_INVALID',
+	// Operationally distinct in the app log (allow-listed reasons), generic on the wire.
+	dispatch_assertion_replay_store_full: 'DISPATCH_ASSERTION_INVALID',
+	dispatch_assertion_actor_invalid: 'DISPATCH_ASSERTION_INVALID',
+});
+
+/**
+ * Maps a verifier failure (the thrown `Error.message`, or a bare reason string)
+ * to the code the Hub sees. Every code keeps the same JSON-RPC error and
+ * message; only `data.code` sharpens, so a Hub that matches `DISPATCH_*` keeps
+ * working. Unknown reasons collapse to `DISPATCH_ASSERTION_INVALID` so a new
+ * verifier failure can never leak an unmapped internal string.
+ */
+export function dispatchRejectionCode(reason: unknown): DispatchRejectionCodeV3 {
+	const key = reason instanceof Error ? reason.message : typeof reason === 'string' ? reason : '';
+	// `hasOwn`: a message like "toString" must not resolve through Object.prototype
+	// to a function, which JSON.stringify would then drop from `data`.
+	return Object.hasOwn(DISPATCH_REJECTION_CODES, key) ? DISPATCH_REJECTION_CODES[key]! : 'DISPATCH_ASSERTION_INVALID';
+}
+
+/**
+ * The reason string behind a rejection, for the app's own log line. Only the
+ * verifier's closed set of reasons passes through; any other error message
+ * (a broker/transport failure, a library error) is clamped to `other` so a
+ * log never carries an arbitrary upstream string.
+ */
+export function dispatchRejectionReason(reason: unknown): string {
+	const key = reason instanceof Error ? reason.message : typeof reason === 'string' ? reason : '';
+	if (!key) return 'dispatch_assertion_invalid';
+	return key === 'dispatch_assertion_invalid' || Object.hasOwn(DISPATCH_REJECTION_CODES, key) ? key : 'other';
+}
+

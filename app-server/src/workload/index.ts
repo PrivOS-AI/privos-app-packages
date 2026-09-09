@@ -29,6 +29,8 @@ export {
 	verifyClusterDispatchAssertionV3,
 	verifyDispatchAssertion,
 	verifyRuntimeDispatchAssertionV3,
+	dispatchRejectionCode,
+	dispatchRejectionReason,
 } from './dispatch-assertion.js';
 export type {
 	RuntimeDispatchAffinityV3,
@@ -38,6 +40,7 @@ export type {
 	RuntimeDispatchReplayConsumerV3,
 	RuntimeDispatchReplayInputV3,
 	RuntimeDispatchSecurityV3,
+	DispatchRejectionCodeV3,
 	RuntimeDispatchTrustHintV3,
 	RuntimeDispatchTrustResolverV3,
 	RuntimeDispatchTrustV3,

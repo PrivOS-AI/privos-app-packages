@@ -471,7 +471,7 @@ describe('protocol-v3 runtime dispatch assertions', () => {
 				...RUNTIME_V3_TRUST,
 				affinity: { ...RUNTIME_V3_TRUST.affinity, runtimeAuthorizationEpoch: 2 },
 			}),
-		})).rejects.toThrow('dispatch_assertion_binding_mismatch');
+		})).rejects.toThrow('runtime_dispatch_trust_mismatch');
 	});
 
 	it('accepts stable pre-start affinity and strictly parses optional post-readiness expectations', async () => {

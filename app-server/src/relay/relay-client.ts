@@ -36,6 +36,7 @@ import { MessageTooLargeError, rawDataToText } from './message-adapter.js';
 import {
 	isStandaloneControlMethod,
 	STANDALONE_AGENT_BOT_CREDENTIAL_METHOD,
+	StandaloneControlError,
 	type StandaloneRelayIdentityController,
 } from './standalone-control.js';
 import {
@@ -55,6 +56,8 @@ import { lintManifest, sha256CanonicalJson } from '../manifest-tools.js';
 import { defaultManifestResolver } from '../serve-app.js';
 import {
 	assertRuntimeDispatchTrustConfigurationV3,
+	dispatchRejectionCode,
+	dispatchRejectionReason,
 	extractRuntimeDispatchRelayEnvelopeV3,
 	verifyRuntimeDispatchAssertionV3,
 	type RuntimeDispatchSecurityV3,
@@ -1375,6 +1378,13 @@ export function connectRelay(opts: RelayClientOptions): RelayHandle {
 					generation,
 					method: transportMsgObj.method,
 					...(err instanceof Error ? { name: err.name } : {}),
+					// `StandaloneControlError.message` IS the code (e.g. standalone_control_assertion_time_invalid);
+					// a persistence failure surfaces its errno (EACCES, ENOSPC) instead — both are secret-free.
+					...(err instanceof StandaloneControlError
+						? { code: err.message }
+						: typeof (err as { code?: unknown } | null)?.code === 'string'
+							? { code: (err as { code: string }).code }
+							: {}),
 				});
 				if (transportMsgObj.method === STANDALONE_AGENT_BOT_CREDENTIAL_METHOD && controlRequestId !== undefined) {
 					safeSend(ws, errorResponse(controlRequestId, jsonRpcError(INVALID_REQUEST, 'Standalone credential delivery rejected')), {
@@ -1386,6 +1396,19 @@ export function connectRelay(opts: RelayClientOptions): RelayHandle {
 			return;
 		}
 
+		// The assertion gate runs BEFORE `relay.rpc.inbound`, so a rejected frame
+		// would otherwise leave no trace in the app log; the Hub only sees the
+		// generic error. Log the reason here and sharpen `data.code` from it.
+		const rejectDispatch = (message: Record<string, unknown>, reason: unknown, extra: Record<string, unknown> = {}) => {
+			const rejectedId = responseFrameId(message);
+			log('relay.rpc.rejected', {
+				generation,
+				...(rejectedId !== undefined ? { requestId: rejectedId } : {}),
+				...(typeof message.method === 'string' ? { method: message.method } : {}),
+				reason: dispatchRejectionReason(reason),
+			});
+			safeSend(ws, dispatchAuthorizationError(message, reason), { generation, ...extra });
+		};
 		let dispatchObject: unknown = parsedJson;
 		let runtimeAuthorization: VerifiedRuntimeDispatchAssertionV3 | undefined;
 		const isRequest = typeof transportMsgObj.method === 'string';
@@ -1411,12 +1434,12 @@ export function connectRelay(opts: RelayClientOptions): RelayHandle {
 					});
 					dispatchObject = envelope.logicalRpc;
 				}
-			} catch {
-				safeSend(ws, dispatchAuthorizationError(transportMsgObj), { generation });
+			} catch (error) {
+				rejectDispatch(transportMsgObj, error);
 				return;
 			}
 		} else if (isRequest && (hasRuntimeAuthorization || hasTopLevelRuntimeMetadata(transportMsgObj))) {
-			safeSend(ws, dispatchAuthorizationError(transportMsgObj), { generation });
+			rejectDispatch(transportMsgObj, 'dispatch_assertion_unexpected');
 			return;
 		}
 		const msgObj =
@@ -1461,7 +1484,7 @@ export function connectRelay(opts: RelayClientOptions): RelayHandle {
 			});
 		} catch (error) {
 			if (runtimeAuthorization && error instanceof Error && error.message === 'dispatch_assertion_binding_mismatch') {
-				safeSend(ws, dispatchAuthorizationError(msgObj), { generation, method, toolName });
+				rejectDispatch(msgObj, error, { method, toolName });
 				return;
 			}
 			throw error;
@@ -1515,7 +1538,7 @@ export function connectRelay(opts: RelayClientOptions): RelayHandle {
 	};
 }
 
-/** Every `safeSend` payload is a JSON-RPC response/error object; extract its `id` for the backpressure substitute. */
+/** Extracts a JSON-RPC `id` (request or response frame) — for the backpressure substitute and the rejection log. */
 function responseFrameId(payload: unknown): string | number | null | undefined {
 	if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return undefined;
 	const obj = payload as Record<string, unknown>;
@@ -1538,12 +1561,12 @@ function hasTopLevelRuntimeMetadata(message: Record<string, unknown>): boolean {
 		Object.prototype.hasOwnProperty.call(message, 'privosUser');
 }
 
-function dispatchAuthorizationError(message: Record<string, unknown>) {
+function dispatchAuthorizationError(message: Record<string, unknown>, reason: unknown = 'dispatch_assertion_invalid') {
 	const id = Object.prototype.hasOwnProperty.call(message, 'id') &&
 		(typeof message.id === 'string' || typeof message.id === 'number' || message.id === null)
 		? message.id
 		: null;
 	return errorResponse(id, jsonRpcError(INVALID_REQUEST, 'Authenticated private dispatch required', {
-		code: 'DISPATCH_ASSERTION_INVALID',
+		code: dispatchRejectionCode(reason),
 	}));
 }

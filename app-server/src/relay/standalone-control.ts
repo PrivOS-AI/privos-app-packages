@@ -333,12 +333,19 @@ export function createStandaloneRelayIdentityController(
 		updatedAt: Date.now(),
 	});
 	const listeners = new Set<(next: StandaloneEffectiveCapabilities) => void>();
-	let credentialDeliveryTail: Promise<void> = Promise.resolve();
+	let identityRotationTail: Promise<void> = Promise.resolve();
 
-	async function runCredentialDeliveryExclusively<T>(operation: () => Promise<T>): Promise<T> {
+	/**
+	 * Serializes every identity-file rewrite (secret rotate, trust rotate, agent-bot
+	 * credential). The relay client handles control frames concurrently and
+	 * `rotateStandaloneIdentity` is read-modify-write, so two overlapping pushes
+	 * would otherwise lose one update — e.g. a credential delivery re-persisting
+	 * the trust it read before a trust rotate renamed the file.
+	 */
+	async function runIdentityRotationExclusively<T>(operation: () => Promise<T>): Promise<T> {
 		let release!: () => void;
-		const previous = credentialDeliveryTail;
-		credentialDeliveryTail = new Promise<void>((resolve) => {
+		const previous = identityRotationTail;
+		identityRotationTail = new Promise<void>((resolve) => {
 			release = resolve;
 		});
 		await previous;
@@ -489,9 +496,9 @@ export function createStandaloneRelayIdentityController(
 		async handleControlNotification(method, params) {
 			if (!isStandaloneControlMethod(method)) return 'ignored';
 			const assertion = isRecord(params) ? params.assertion : undefined;
-			if (method === STANDALONE_SECRET_ROTATE_METHOD) await applySecretRotate(assertion);
-			else if (method === STANDALONE_TRUST_ROTATE_METHOD) await applyTrustRotate(assertion);
-			else if (method === STANDALONE_AGENT_BOT_CREDENTIAL_METHOD) return runCredentialDeliveryExclusively(() => applyAgentBotCredential(assertion));
+			if (method === STANDALONE_SECRET_ROTATE_METHOD) await runIdentityRotationExclusively(() => applySecretRotate(assertion));
+			else if (method === STANDALONE_TRUST_ROTATE_METHOD) await runIdentityRotationExclusively(() => applyTrustRotate(assertion));
+			else if (method === STANDALONE_AGENT_BOT_CREDENTIAL_METHOD) return runIdentityRotationExclusively(() => applyAgentBotCredential(assertion));
 			else await applyCapabilitiesChanged(assertion);
 			return 'handled';
 		},

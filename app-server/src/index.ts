@@ -240,6 +240,8 @@ export type {
 	WorkloadIdentityErrorCode,
 } from './workload/workload-identity.js';
 export {
+	dispatchRejectionCode,
+	dispatchRejectionReason,
 	BoundedRuntimeDispatchReplayConsumerV3,
 	assertRuntimeDispatchRelayAffinityV3,
 	assertRuntimeDispatchTrustConfigurationV3,
@@ -253,6 +255,7 @@ export {
 	verifyRuntimeDispatchAssertionV3,
 } from './workload/dispatch-assertion.js';
 export type {
+	DispatchRejectionCodeV3,
 	RuntimeDispatchAffinityV3,
 	RuntimeDispatchExecutionModeV3,
 	RuntimeDispatchRelayAuthorizationV3,
