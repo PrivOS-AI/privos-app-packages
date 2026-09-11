@@ -1,0 +1,54 @@
+{
+  "name": "@privos_ai/agent-harness",
+  "version": "0.1.0",
+  "description": "Bridge CLI that pairs a PrivOS hub agent with a locally running ACP coding agent (Claude Code, Codex, Cursor, Goose, or a custom command).",
+  "license": "MIT",
+  "author": "PrivOS",
+  "type": "module",
+  "keywords": [
+    "privos",
+    "acp",
+    "agent-client-protocol",
+    "cli",
+    "harness"
+  ],
+  "bin": {
+    "privos-agent-harness": "dist/cli.js"
+  },
+  "main": "dist/cli.js",
+  "types": "dist/cli.d.ts",
+  "files": [
+    "dist",
+    "templates",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsup",
+    "prepublishOnly": "npm run build",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "^1.4.0",
+    "@privos_ai/skill-sdk": "^1.0.0",
+    "axios": "^1.7.0",
+    "commander": "^14.0.0",
+    "tar": "^7.4.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/ws": "^8.5.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.9.3",
+    "vitest": "4.1.11",
+    "ws": "^8.18.0"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}

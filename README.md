@@ -9,6 +9,7 @@ Packages for building apps on the [PrivOS](https://privos.ai) platform.
 | [`@privos_ai/app-react`](./app-react/) | React hooks for Privos MCP apps — `usePrivosContext`, `usePrivosTool`, `useLists`, etc. |
 | [`@privos_ai/app-server`](./app-server/) | Business-agnostic MCP Direct/Relay runtime — JSON-RPC, auth, Express Router, Relay client |
 | [`create-privos-mcp-app`](./create-privos-mcp-app/) | CLI scaffolder — `npx create-privos-mcp-app my-app` |
+| [`@privos_ai/agent-harness`](./agent-harness/) | Bridge CLI pairing a hub agent with a local ACP coding agent (Claude Code, Codex, Cursor, Goose, custom) |
 
 ## Quick Start
 
