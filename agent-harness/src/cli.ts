@@ -40,6 +40,7 @@ import { seedAdapterState } from './adapter-state.js';
 import { resolveIsolation, runSelfTest, wrapCommand, type BaseIsolationLevel } from './isolation/index.js';
 import { redact } from './redact.js';
 import { BRIDGE_VERSION } from './version.js';
+import { installSystemdService, uninstallSystemdService, statusSystemdService, defaultUnitName } from './service-install.js';
 
 /** Pool cap 8 / idle reap 10 min — fixed by user decision (validation session 10), not a CLI knob. */
 const ROOM_IDLE_REAP_MS = 10 * 60 * 1000;
@@ -684,6 +685,92 @@ program
 			noSkills: opts.skills === false,
 			skillsDir: opts.skillsDir as string | undefined,
 		}).catch((e: unknown) => fail(String(e instanceof Error ? e.message : e)));
+	});
+
+// ---------------------------------------------------------------------------
+// service install|uninstall|status  (systemd user service)
+// ---------------------------------------------------------------------------
+
+const service = program.command('service').description('Install/manage the bridge as a systemd user service (Linux).');
+
+service
+	.command('install')
+	.description('Generate + enable a systemd user unit that runs "start" with the given flags.')
+	// The subset of `start` flags a service needs baked into its ExecStart:
+	.option('--agent <id>', 'agent id to run (default: the sole paired agent)')
+	.option('--adapter <id>', `ACP adapter: ${ADAPTER_IDS.join('|')}`, 'claude')
+	.option('--command <cmd>', 'override the adapter spawn command')
+	.option('--workspace <dir>', 'workspace directory (default ~/privos-harness/<agentId>)')
+	.option('--isolation <level>', `isolation level: ${ISOLATION_FLAGS.join('|')}`, 'auto')
+	.option('--max-rooms <n>', 'per-room adapter-process pool cap', '8')
+	.option('--container-image <image>', 'image for --isolation container', DEFAULT_CONTAINER_IMAGE)
+	.option('--permissions <policy>', `permission policy: ${PERMISSION_POLICIES.join('|')}`, 'safe')
+	.option('--idle-timeout <seconds>', 'idle timeout in seconds', '600')
+	.option('--insecure', 'allow plain http:// / ws:// to a non-localhost hub')
+	.option('--no-skills', 'skip auto-updating the PrivOS skills bundle on start')
+	.option('--skills-dir <dir>', 'update skills from a local privos-sandbox checkout')
+	// Service-specific:
+	.option('--name <unit>', 'systemd unit name (default privos-agent-harness-<agentId>)')
+	.option('--no-linger', 'do not run "loginctl enable-linger" (service stops at logout)')
+	.option('--no-enable', 'write the unit but do not start it')
+	.option('--print', 'print the unit to stdout instead of writing/enabling it (works on any OS)')
+	.action((opts: Record<string, unknown>) => {
+		const adapter = opts.adapter as string;
+		if (!ADAPTER_IDS.includes(adapter as AdapterId)) fail(`--adapter must be one of: ${ADAPTER_IDS.join(', ')}`);
+		const isolation = opts.isolation as string;
+		if (!ISOLATION_FLAGS.includes(isolation as (typeof ISOLATION_FLAGS)[number])) fail(`--isolation must be one of: ${ISOLATION_FLAGS.join(', ')}`);
+		const permissions = opts.permissions as string;
+		if (!PERMISSION_POLICIES.includes(permissions as PermissionPolicy)) fail(`--permissions must be one of: ${PERMISSION_POLICIES.join(', ')}`);
+		try {
+			const agentId = resolveAgentId(opts.agent as string | undefined);
+			const { command: adapterCommand } = resolveAdapterCommand(adapter as AdapterId, opts.command as string | undefined);
+			// Explicit start argv baked into the unit (defaults included, so the
+			// unit fully documents how the service runs).
+			const startArgs = ['start', '--agent', agentId, '--adapter', adapter, '--isolation', isolation, '--permissions', permissions, '--max-rooms', String(opts.maxRooms), '--idle-timeout', String(opts.idleTimeout)];
+			if (opts.command) startArgs.push('--command', String(opts.command));
+			if (opts.workspace) startArgs.push('--workspace', String(opts.workspace));
+			if (isolation === 'container') startArgs.push('--container-image', String(opts.containerImage));
+			if (opts.insecure) startArgs.push('--insecure');
+			if (opts.skills === false) startArgs.push('--no-skills');
+			if (opts.skillsDir) startArgs.push('--skills-dir', String(opts.skillsDir));
+			installSystemdService({
+				agentId,
+				unitName: (opts.name as string | undefined) ?? defaultUnitName(agentId),
+				startArgs,
+				adapterCommand,
+				linger: opts.linger !== false,
+				enable: opts.enable !== false,
+				print: Boolean(opts.print),
+			});
+		} catch (e) {
+			fail(e instanceof Error ? e.message : String(e));
+		}
+	});
+
+service
+	.command('uninstall')
+	.description('Stop and remove the systemd user unit.')
+	.option('--agent <id>', 'agent id (to derive the default unit name)')
+	.option('--name <unit>', 'systemd unit name (default privos-agent-harness-<agentId>)')
+	.action((opts: { agent?: string; name?: string }) => {
+		try {
+			uninstallSystemdService(opts.name ?? defaultUnitName(resolveAgentId(opts.agent)));
+		} catch (e) {
+			fail(e instanceof Error ? e.message : String(e));
+		}
+	});
+
+service
+	.command('status')
+	.description('Show the systemd user unit status.')
+	.option('--agent <id>', 'agent id (to derive the default unit name)')
+	.option('--name <unit>', 'systemd unit name (default privos-agent-harness-<agentId>)')
+	.action((opts: { agent?: string; name?: string }) => {
+		try {
+			statusSystemdService(opts.name ?? defaultUnitName(resolveAgentId(opts.agent)));
+		} catch (e) {
+			fail(e instanceof Error ? e.message : String(e));
+		}
 	});
 
 // ---------------------------------------------------------------------------
