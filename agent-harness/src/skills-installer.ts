@@ -161,15 +161,18 @@ export async function parseAndVerifyBundle(buffer: Buffer): Promise<{ entries: P
 				entry.resume();
 				return;
 			}
+			// Directory entries (`skills/`, `skills/<name>/`) are never written —
+			// only file entries are materialized — so they skip path validation,
+			// which would otherwise reject the bare `skills` root as "outside".
+			if (entry.type === 'Directory') {
+				entry.resume();
+				return;
+			}
 			let archivePath: string;
 			try {
 				archivePath = validateArchivePath(entry.path);
 			} catch (err) {
 				violation ??= err as Error;
-				entry.resume();
-				return;
-			}
-			if (entry.type === 'Directory') {
 				entry.resume();
 				return;
 			}

@@ -16,6 +16,7 @@ const spec: AdapterSpec = {
 	args: ['--experimental-strip-types', fakeAgentPath],
 	systemPromptTransport: 'prefix',
 	authHint: 'n/a',
+	installHint: 'n/a',
 	expectedLoadSession: true,
 	steering: 'none',
 	credentialFiles: [],

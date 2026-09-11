@@ -166,7 +166,7 @@ export async function runSelfTest(
 			return { level, passed: false, detail: `no "wrap" implementation for platform "${platform()}"`, checks: {} };
 		}
 	} else {
-		if (!binaryAvailable('docker', ['info'])) {
+		if (spawnSync('docker', ['info'], { stdio: 'ignore', timeout: 10_000 }).status !== 0) {
 			return { level, passed: false, detail: 'docker is not installed or the daemon is unreachable', checks: {} };
 		}
 	}

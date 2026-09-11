@@ -189,7 +189,9 @@ export class TurnRunner {
 			if (identity !== undefined) writeIdentityFile(this.opts.workspaceDir, identity);
 		}
 
-		const result = await this.opts.session.runTurn({
+		let result: RunTurnResult;
+		try {
+			result = await this.opts.session.runTurn({
 			turnId: params.turnId,
 			sessionKey: params.sessionKey,
 			roomId: params.roomId,
@@ -211,7 +213,17 @@ export class TurnRunner {
 			onActivity: (activity) => {
 				this.relay?.notify('turn.activity', { turnId: params.turnId, ...activity, timestamp: new Date().toISOString() });
 			},
-		});
+			});
+		} catch (error) {
+			// Adapter failed to start (binary missing, sandbox wrapper refused,
+			// ...) — report it as a failed turn so the hub does not wait out the
+			// deadline, and keep the queue loop alive (an uncaught rejection here
+			// would take the whole bridge down).
+			const message = error instanceof Error ? error.message : String(error);
+			process.stderr.write(`[agent-harness] turn ${params.turnId} failed before the adapter answered: ${message}\n`);
+			this.relay?.notify('turn.done', { turnId: params.turnId, status: 'failed', text: '', errorMessage: message, sessionFresh: false });
+			return;
+		}
 
 		const cwd = this.opts.roomDir ? this.opts.roomDir(params.roomId) : this.opts.cwd;
 		setSession(this.opts.agentId, params.sessionKey, result.acpSessionId, { adapter: this.opts.adapterId, cwd });

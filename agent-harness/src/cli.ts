@@ -299,6 +299,9 @@ async function runStart(options: StartOptions): Promise<void> {
 
 	const { command, args } = resolveAdapterCommand(options.adapter, options.command);
 	const spec = { ...ADAPTER_TABLE[options.adapter], command, args };
+	if (!isCommandOnPath(command)) {
+		fail(`adapter command "${command}" not found on PATH. Install it first: ${spec.installHint}`);
+	}
 	const maxRooms = Number(options.maxRooms);
 	if (!Number.isFinite(maxRooms) || maxRooms < 1) fail('--max-rooms must be a positive integer.');
 	const idleTimeoutMs = Number(options.idleTimeout) * 1000;
@@ -324,7 +327,12 @@ async function runStart(options: StartOptions): Promise<void> {
 		containerImage: options.containerImage,
 		verbose: options.verbose,
 	});
-	for (const t of selfTests) console.log(`    ${t.level}: ${t.detail}`);
+	for (const t of selfTests) {
+		console.log(`    ${t.level}: ${t.detail}`);
+		for (const [name, check] of Object.entries(t.checks)) {
+			if (!check.skipped && !check.passed) console.log(`      ${name}: ${check.detail}`);
+		}
+	}
 	const reportedLevel = reportedIsolationLevel(baseLevel, spec);
 	console.log(`  isolation:   ${reportedLevel}${reportedLevel !== baseLevel ? ` (base ${baseLevel})` : ''}`);
 	if (reportedLevel === 'prompt' || reportedLevel === 'none') {
@@ -546,7 +554,7 @@ async function runDoctor(options: { agent?: string; adapter: AdapterId; command?
 	} catch (error) {
 		fail(error instanceof Error ? error.message : String(error));
 	}
-	console.log(`command:      ${command} — ${isCommandOnPath(command) ? 'found on PATH' : 'NOT FOUND on PATH'}`);
+	console.log(`command:      ${command} — ${isCommandOnPath(command) ? 'found on PATH' : `NOT FOUND on PATH (install: ${spec.installHint})`}`);
 
 	console.log('');
 	console.log('runtime checks (python3 >= 3.9, node >= 22, bash — required by the PrivOS skills):');

@@ -13,6 +13,7 @@ function fakeSpec(overrides: Partial<AdapterSpec>): AdapterSpec {
 		args: [],
 		systemPromptTransport: 'prefix',
 		authHint: 'n/a',
+		installHint: 'n/a',
 		expectedLoadSession: false,
 		steering: 'none',
 		credentialFiles: [],

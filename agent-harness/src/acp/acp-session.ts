@@ -8,7 +8,7 @@
  * so a pool of these can be substituted without changing callers.
  */
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { Readable, Writable } from 'node:stream';
+import { Readable } from 'node:stream';
 import {
 	client,
 	ndJsonStream,
@@ -16,6 +16,7 @@ import {
 	type AgentCapabilities,
 	type ClientContext,
 	type ContentBlock,
+	type InitializeResponse,
 	type NewSessionRequest,
 	type PermissionOption,
 	type SessionUpdate,
@@ -154,14 +155,31 @@ export class AcpSession {
 		} else {
 			child.stderr.resume();
 		}
+		let spawnError: Error | undefined;
 		child.on('error', (err) => {
+			spawnError = err;
 			process.stderr.write(`[agent-harness] adapter process error: ${err.message}\n`);
 		});
+		// Resolved on `exit` OR `error`: a failed spawn (ENOENT) emits `error` and
+		// may never emit `exit`, and `dispose()` waits on this.
+		this.connectionClosed = new Promise((resolve) => {
+			child.once('exit', () => resolve());
+			child.once('error', () => resolve());
+		});
 
-		const stream: Stream = ndJsonStream(
-			Writable.toWeb(child.stdin) as unknown as WritableStream<Uint8Array>,
-			Readable.toWeb(child.stdout) as unknown as ReadableStream<Uint8Array>,
-		);
+		// Hand-rolled stdin adapter instead of `Writable.toWeb(child.stdin)`: on
+		// Node 22.16 that adapter turns a premature pipe close (adapter binary
+		// missing / died before initialize) into an unobserved AbortError
+		// rejection that crashes the whole bridge. Here the only promise is the
+		// write callback, which the ACP SDK awaits.
+		const stdin = new WritableStream<Uint8Array>({
+			write: (chunk) =>
+				new Promise<void>((resolve, reject) => {
+					child.stdin.write(chunk, (err) => (err ? reject(err) : resolve()));
+				}),
+			close: () => new Promise<void>((resolve) => child.stdin.end(resolve)),
+		});
+		const stream: Stream = ndJsonStream(stdin, Readable.toWeb(child.stdout) as unknown as ReadableStream<Uint8Array>);
 
 		const app = client({ name: 'privos-agent-harness' });
 		app.onRequest('session/request_permission', async ({ params }) => {
@@ -186,16 +204,22 @@ export class AcpSession {
 			app.connect(stream);
 		});
 		this.ctx = await connectionPromise;
-		this.connectionClosed = new Promise((resolve) => child.once('exit', () => resolve()));
 
-		const initResult = await this.ctx.request('initialize', {
-			protocolVersion: PROTOCOL_VERSION,
-			clientCapabilities: {
-				fs: { readTextFile: false, writeTextFile: false },
-				terminal: false,
-			},
-			clientInfo: { name: 'privos-agent-harness', version: BRIDGE_VERSION },
-		});
+		let initResult: InitializeResponse;
+		try {
+			initResult = await this.ctx.request<InitializeResponse>('initialize', {
+				protocolVersion: PROTOCOL_VERSION,
+				clientCapabilities: {
+					fs: { readTextFile: false, writeTextFile: false },
+					terminal: false,
+				},
+				clientInfo: { name: 'privos-agent-harness', version: BRIDGE_VERSION },
+			});
+		} catch (error) {
+			// A dead pipe surfaces as EPIPE / "connection closed"; name the real cause.
+			if (spawnError) throw new Error(`adapter "${this.spec.command}" failed to start: ${spawnError.message}`);
+			throw error;
+		}
 		this.agentCapabilities = initResult.agentCapabilities;
 		const steeringMeta = (initResult._meta as { steering?: { supported?: unknown } } | null | undefined)?.steering;
 		this.steeringSupported = steeringMeta?.supported === true;

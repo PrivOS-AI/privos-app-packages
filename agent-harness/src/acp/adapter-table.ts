@@ -39,6 +39,8 @@ export interface AdapterSpec {
 	systemPromptTransport: SystemPromptTransport;
 	/** Shown by `doctor` as the auth hint for this adapter. */
 	authHint: string;
+	/** How to get `command` onto PATH — printed when `start`/`doctor` cannot find it. */
+	installHint: string;
 	/**
 	 * Declared (not yet verified) `loadSession` expectation, reported in
 	 * `harness.hello` before the adapter has ever been spawned/initialized.
@@ -105,6 +107,7 @@ export const ADAPTER_TABLE: Record<AdapterId, AdapterSpec> = {
 		args: [],
 		systemPromptTransport: 'meta',
 		authHint: 'requires either an active `claude` CLI login or ANTHROPIC_API_KEY in the environment',
+		installHint: 'npm install -g @zed-industries/claude-agent-acp',
 		expectedLoadSession: true,
 		steering: 'acp-extension',
 		credentialFiles: ['.credentials.json'],
@@ -120,6 +123,7 @@ export const ADAPTER_TABLE: Record<AdapterId, AdapterSpec> = {
 		args: [],
 		systemPromptTransport: 'prefix',
 		authHint: 'requires either OPENAI_API_KEY in the environment or a `codex` CLI login',
+		installHint: 'npm install -g @zed-industries/codex-acp',
 		expectedLoadSession: false,
 		steering: 'acp-extension',
 		credentialFiles: ['auth.json'],
@@ -135,6 +139,7 @@ export const ADAPTER_TABLE: Record<AdapterId, AdapterSpec> = {
 		args: ['acp'],
 		systemPromptTransport: 'prefix',
 		authHint: 'requires the Cursor CLI (`agent`) to be logged in',
+		installHint: 'curl https://cursor.com/install -fsS | bash',
 		expectedLoadSession: false,
 		steering: 'none',
 		// No documented per-adapter credential file — keeps shared/real state;
@@ -150,6 +155,7 @@ export const ADAPTER_TABLE: Record<AdapterId, AdapterSpec> = {
 		args: ['acp'],
 		systemPromptTransport: 'top-level',
 		authHint: 'requires goose to be configured with a provider; GOOSE_MODE=auto is recommended',
+		installHint: 'see https://block.github.io/goose/docs/getting-started/installation',
 		expectedLoadSession: false,
 		// Goose's `_goose/unstable/session/steer` needs a run id from
 		// `session/update` metadata that this bridge doesn't capture -- not
@@ -166,6 +172,7 @@ export const ADAPTER_TABLE: Record<AdapterId, AdapterSpec> = {
 		args: [],
 		systemPromptTransport: 'prefix',
 		authHint: 'depends on the custom command supplied via --command',
+		installHint: 'supply an executable on PATH via --command',
 		expectedLoadSession: false,
 		steering: 'none',
 		credentialFiles: [],
