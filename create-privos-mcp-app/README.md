@@ -12,6 +12,10 @@ instead of returning the raw Vite `index.html`. See
 [Production UI: assets served by the Hub](#production-ui-assets-served-by-the-hub)
 below — apps scaffolded from `0.4.0` or earlier keep the bug until upgraded.
 
+`--template instant` scaffolds an INSTANT (frontend-only, no runtime) app for
+a publisher that ships only a UI — no server, no Dockerfile, no
+`@privos_ai/app-server` dependency. See [Templates](#templates) below.
+
 ## Usage
 
 ```bash
@@ -20,6 +24,21 @@ cd my-app
 npm install
 npm run dev
 ```
+
+## Templates
+
+```bash
+npx create-privos-mcp-app my-app --template default    # Express + React + MCP server (the default)
+npx create-privos-mcp-app my-app --template instant     # frontend-only, no server, no Dockerfile
+```
+
+`default` scaffolds the full MCP app server described below. `instant`
+scaffolds only the Vite/React UI plus a `privos-app.json` declaring
+`executionMode: "INSTANT"` with a required `ui.entryPoints.roomTab` and an
+optional `agent` section — there is no runtime to configure, so `tools`,
+`serverUrl`/`runtimeTrustProvisioningUrl`, `port`, `resources`, `volumes` and
+`stateless` are all rejected by `privos-app lint` for this mode. An unknown
+`--template` name exits with the list of valid names.
 
 ## What Gets Generated
 

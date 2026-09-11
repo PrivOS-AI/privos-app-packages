@@ -5,7 +5,11 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-const TEMPLATE_DIR = path.join(__dirname, '..', 'templates', 'default');
+const TEMPLATES_ROOT = path.join(__dirname, '..', 'templates');
+/** Every template directory under `templates/` this CLI knows how to scaffold. */
+export const SCAFFOLD_TEMPLATES = ['default', 'instant'] as const;
+export type ScaffoldTemplate = (typeof SCAFFOLD_TEMPLATES)[number];
+const DEFAULT_SCAFFOLD_TEMPLATE: ScaffoldTemplate = 'default';
 const APP_SERVER_PACKAGE_NAME = '@privos_ai/app-server';
 const SKILL_NAME = 'privos-app-publish';
 
@@ -83,9 +87,13 @@ function copyAppServerSkill(targetDir: string): void {
 	}
 }
 
-export async function scaffoldApp(appName: string): Promise<void> {
+export async function scaffoldApp(appName: string, options: { template?: string } = {}): Promise<void> {
 	if (!/^[a-z0-9][a-z0-9-]{1,62}$/.test(appName)) {
 		throw new Error('App name must be 2-63 lowercase letters, numbers or hyphens, starting with a letter or number');
+	}
+	const template = options.template ?? DEFAULT_SCAFFOLD_TEMPLATE;
+	if (!(SCAFFOLD_TEMPLATES as readonly string[]).includes(template)) {
+		throw new Error(`Unknown template "${template}". Valid templates: ${SCAFFOLD_TEMPLATES.join(', ')}`);
 	}
 	const targetDir = path.resolve(process.cwd(), appName);
 
@@ -93,6 +101,6 @@ export async function scaffoldApp(appName: string): Promise<void> {
 		throw new Error(`Directory "${appName}" already exists`);
 	}
 
-	copyDir(TEMPLATE_DIR, targetDir, appName);
+	copyDir(path.join(TEMPLATES_ROOT, template), targetDir, appName);
 	copyAppServerSkill(targetDir);
 }

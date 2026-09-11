@@ -300,6 +300,19 @@ export {
 } from './manifest-tools.js';
 export type { ManifestLintResult } from './manifest-tools.js';
 
+export {
+	INSTANT_EXECUTION_MODE,
+	INSTANT_UI_ENTRY_POINT_SLOTS,
+	lintInstantManifest,
+} from './manifest-lint-instant.js';
+export type {
+	InstantManifestAgent,
+	InstantManifestLintResult,
+	InstantManifestUi,
+	InstantUiEntryPoint,
+	InstantUiEntryPointSlot,
+} from './manifest-lint-instant.js';
+
 export { serveBuiltUi } from './ui/serve-built-ui.js';
 export type { ServeBuiltUi, ServeBuiltUiOptions } from './ui/serve-built-ui.js';
 export {

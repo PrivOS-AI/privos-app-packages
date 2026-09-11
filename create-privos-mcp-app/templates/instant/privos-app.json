@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 2,
+  "kind": "mcp-app",
+  "name": "{{APP_ID}}",
+  "version": "1.0.0",
+  "title": "{{APP_NAME}}",
+  "description": "A Privos MCP app (Instant — frontend-only, no runtime)",
+  "author": {
+    "name": "Developer"
+  },
+  "executionMode": "INSTANT",
+  "permissions": [
+    {
+      "scope": "basic:information",
+      "requirement": "required",
+      "context": "workspace",
+      "executionContext": "user",
+      "feature": "dashboard.core",
+      "reason": "Identify the active PrivOS installation."
+    }
+  ],
+  "ui": {
+    "entryPoints": {
+      "roomTab": {
+        "title": "{{APP_NAME}}",
+        "resourceUri": "ui://{{APP_ID}}/dashboard.html"
+      }
+    }
+  },
+  "agent": {
+    "purpose": "Help the user with {{APP_NAME}} and answer questions about what's shown in its room tab.",
+    "personality": "Friendly and concise.",
+    "knowledge": [],
+    "hubTools": []
+  },
+  "license": {
+    "tiers": [
+      {
+        "id": "default",
+        "name": "Free",
+        "features": []
+      }
+    ]
+  }
+}

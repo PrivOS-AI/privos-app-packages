@@ -588,3 +588,65 @@ describe('protocol-v3 runtime dispatch assertions', () => {
 		for (const body of denied) expect(isUnsignedRuntimeReadinessRpcV3(body, security)).toBe(false);
 	});
 });
+
+// Phase 11 (Instant MCP Apps): `RuntimeDispatchExecutionModeV3` is a
+// two-value ALLOWLIST, not a refusal list — INSTANT apps have no runtime to
+// dispatch a signed assertion to, so they are refused simply by never being
+// added to the allowlist. These tests assert that refusal holds with no
+// change to `dispatch-assertion.ts` (adding 'INSTANT' to the allowlist would
+// wrongly *permit* an INSTANT dispatch assertion, the opposite of the intent).
+describe('RuntimeDispatchExecutionModeV3 allowlist refuses INSTANT (no source change)', () => {
+	function encodeFlat(value: Record<string, unknown>): string {
+		return Buffer.from(
+			JSON.stringify(Object.fromEntries(Object.entries(value).sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)))),
+		).toString('base64url');
+	}
+
+	it('assertRuntimeDispatchTrustConfigurationV3 (:443) rejects an INSTANT affinity', () => {
+		expect(() => assertRuntimeDispatchTrustConfigurationV3({
+			...RUNTIME_V3_TRUST,
+			affinity: { ...RUNTIME_V3_TRUST.affinity, executionMode: 'INSTANT' },
+		})).toThrow('runtime_dispatch_trust_invalid');
+	});
+
+	it('verifyRuntimeDispatchAssertionV3 (:342) rejects an otherwise well-formed INSTANT payload before signature verification', async () => {
+		const header = { alg: 'ES256', kid: 'kid-1', privos_protocol: 3, typ: 'privos-hub-runtime-dispatch+jws' };
+		const payload = {
+			protocolVersion: 3,
+			type: 'hub-runtime-dispatch-assertion',
+			iss: 'hub:deployment-1',
+			aud: 'mcp-runtime:mcp-app-1',
+			jti: 'jti-instant-1',
+			nonce: 'F'.repeat(32),
+			iat: RUNTIME_V3_NOW,
+			exp: RUNTIME_V3_NOW + 10,
+			workspaceId: 'workspace-1',
+			deploymentId: 'deployment-1',
+			mcpAppId: 'mcp-app-1',
+			executionMode: 'INSTANT',
+			generationId: 'generation-1',
+			generationNumber: 1,
+			runtimeInstallationId: 'installation-1',
+			manifestDigest: `sha256:${'a'.repeat(64)}`,
+			resourceManifestHash: 'B'.repeat(43),
+			runtimeResourceInventoryHash: 'C'.repeat(43),
+			runtimeApprovalReceiptHash: 'D'.repeat(43),
+			runtimeAuthorizationEpoch: 1,
+			htm: 'POST',
+			htu: '/mcp',
+			bodyDigest: 'E'.repeat(43),
+			authorizationContext: 'workspace',
+		};
+		// The signature bytes never matter here: the executionMode allowlist
+		// check runs inside `assertRuntimeDispatchPayloadV3`, before signature
+		// verification, so a syntactically valid-but-unsigned third segment is
+		// enough to reach — and prove — the refusal.
+		const compact = `${encodeFlat(header)}.${encodeFlat(payload)}.${Buffer.alloc(64, 7).toString('base64url')}`;
+
+		await expect(verifyRuntimeDispatchAssertionV3({
+			compact,
+			body: {},
+			security: runtimeV3Security(),
+		})).rejects.toThrow('dispatch_assertion_invalid');
+	});
+});
