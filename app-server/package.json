@@ -74,5 +74,10 @@
     "typescript": "^5.9.3",
     "vitest": "^4.1.10"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/PrivOS-AI/privos-app-packages.git",
+    "directory": "app-server"
+  }
 }

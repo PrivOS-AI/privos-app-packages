@@ -10,7 +10,9 @@ name: publish
 #   Repository:       privos-app-packages
 #   Workflow filename: publish.yml
 #   Environment:      (leave blank)
-# Configure it for BOTH @privos_ai/app-server and create-privos-mcp-app.
+# Configure it for every package in this repo: @privos_ai/agent-harness,
+# @privos_ai/app-license, @privos_ai/app-react, @privos_ai/app-server and
+# create-privos-mcp-app.
 #
 # Release flow: bump the package's version (committed), then run this workflow
 # from the Actions tab, choosing the package. Publishing a version that already
@@ -24,6 +26,9 @@ on:
         required: true
         type: choice
         options:
+          - agent-harness
+          - app-license
+          - app-react
           - app-server
           - create-privos-mcp-app
 

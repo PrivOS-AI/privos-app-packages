@@ -7,7 +7,10 @@
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "files": ["dist", "LICENSE"],
+  "files": [
+    "dist",
+    "LICENSE"
+  ],
   "publishConfig": {
     "access": "public"
   },
@@ -20,5 +23,10 @@
     "@types/node": "^20.0.0",
     "tsx": "^4.19.0",
     "typescript": "^5.9.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/PrivOS-AI/privos-app-packages.git",
+    "directory": "app-license"
   }
 }
