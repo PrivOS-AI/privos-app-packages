@@ -1,6 +1,6 @@
 {
   "name": "@privos_ai/agent-harness",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Bridge CLI that pairs a PrivOS hub agent with a locally running ACP coding agent (Claude Code, Codex, Cursor, Goose, or a custom command).",
   "license": "MIT",
   "author": "PrivOS",
