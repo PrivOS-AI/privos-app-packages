@@ -9,7 +9,12 @@ name: publish
 #   Organization:     PrivOS-AI
 #   Repository:       privos-app-packages
 #   Workflow filename: publish.yml
-#   Environment:      (leave blank)
+#   Environment:      release
+#
+# One workflow file is the trust root for every package below, so whoever can
+# change it can publish any of them. The `release` environment is what bounds
+# that: it only accepts runs from `main` and it holds each run for a human
+# approval before the OIDC credential is ever minted.
 # Configure it for every package in this repo: @privos_ai/agent-harness,
 # @privos_ai/app-license, @privos_ai/app-react, @privos_ai/app-server and
 # create-privos-mcp-app.
@@ -39,6 +44,10 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    # Gates the npm credential behind a reviewer and restricts the run to `main`.
+    # Must match the Environment registered on npmjs for every package here —
+    # changing one without the other breaks publishing.
+    environment: release
     defaults:
       run:
         working-directory: ${{ inputs.package }}
