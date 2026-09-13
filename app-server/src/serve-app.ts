@@ -28,6 +28,14 @@
  *    + the standalone identity controller + agent-bot hub from the paired Hub
  *    origin + `connectRelay` (MCP rides the Relay WebSocket, not HTTP) + the
  *    SDK readiness check. Any persisted agent-bot credential is adopted at boot.
+ *  - runtime-v3: a Direct HTTP router mounted with `runtimeDispatchV3` built
+ *    from the driver's env (inbound: Hub-signed dispatch assertion, or the
+ *    unsigned pre-activation readiness triple when the driver allows it) and
+ *    `workloadSecurity: 'disabled'` (legacy managed dispatch is never accepted
+ *    here). The MANAGED workload identity SINGLETON is used for OUTBOUND Hub
+ *    calls + the capability monitor only when its socket is present — before
+ *    that (e.g. PREACTIVATION with no broker yet) there is no outbound
+ *    identity and the agent-bot hub falls back to the dev Hub origin.
  *
  * `/health` and `/ready` exist in ALL modes (marketplace Docker HEALTHCHECK and
  * the cluster monitor probe them). Ambiguous identity or production-without-
@@ -61,8 +69,10 @@ import {
 import { createStandaloneReadinessCheck } from './relay/standalone-readiness.js';
 import { resolveRuntimeMode, RuntimeModeError, type RuntimeMode } from './runtime-mode.js';
 import type { AppMcpHandler, UiResourceProvider } from './runtime.js';
+import type { RuntimeDispatchSecurityV3 } from './workload/dispatch-assertion.js';
 import {
 	getWorkloadIdentityClient,
+	type EffectiveCapabilities,
 	type WorkloadIdentityClient,
 } from './workload/workload-identity.js';
 
@@ -168,6 +178,8 @@ export async function serveApp(options: ServeAppOptions): Promise<ServeAppHandle
 	const resolution = resolveMode({ env });
 	const mode = resolution.mode;
 	logger('serveApp.mode_resolved', { mode, reason: resolution.reason });
+	// Only present when mode === 'runtime-v3'; resolveRuntimeMode guarantees it.
+	const runtimeV3 = mode === 'runtime-v3' ? resolution.runtimeV3! : undefined;
 
 	if (options.transportOverride !== undefined && mode !== 'development') {
 		// H1: transportOverride is the API form of PRIVOS_TRANSPORT and is a
@@ -200,6 +212,30 @@ export async function serveApp(options: ServeAppOptions): Promise<ServeAppHandle
 			}
 		};
 		agentBotHub = createAgentBotHubClientFromWorkloadIdentity(workloadIdentityClient);
+		mountDirectRouter = true;
+	} else if (mode === 'runtime-v3') {
+		// Outbound identity is the MANAGED broker socket, but ONLY when it is
+		// actually present: PREACTIVATION (no broker yet) has no outbound
+		// identity at all, and this mode never falls back to the legacy managed
+		// dispatch path the way `getWorkloadIdentityClient()` would suggest.
+		const getClient = options.__test?.getWorkloadIdentityClient ?? getWorkloadIdentityClient;
+		const candidateClient = getClient();
+		if (candidateClient.isAvailable()) {
+			workloadIdentityClient = candidateClient;
+			resolveHubOrigin = async () => {
+				try {
+					return (await workloadIdentityClient!.brokerContext()).hubOrigin;
+				} catch {
+					return undefined;
+				}
+			};
+			agentBotHub = createAgentBotHubClientFromWorkloadIdentity(workloadIdentityClient);
+		} else {
+			// No broker socket yet: the dev fallback origin (PRIVOS_URL) is the
+			// only Hub address available in this state (e.g. PREACTIVATION).
+			resolveHubOrigin = async () => developmentHubOrigin(env);
+			agentBotHub = createAgentBotHubClient({ resolveHubOrigin });
+		}
 		mountDirectRouter = true;
 	} else if (mode === 'standalone-production') {
 		const load = options.__test?.loadStandaloneIdentity ?? loadStandaloneIdentity;
@@ -267,6 +303,22 @@ export async function serveApp(options: ServeAppOptions): Promise<ServeAppHandle
 				// Development leaves the default 'auto', which with no workload
 				// socket accepts unsigned — safe only because dev binds loopback.
 				...(mode === 'managed' ? { workloadSecurity: 'required' as const, workloadIdentityClient } : {}),
+				// runtime-v3 never accepts the legacy managed dispatch header —
+				// its final-boundary authorization is `runtimeDispatchV3` instead.
+				...(mode === 'runtime-v3'
+					? {
+							workloadSecurity: 'disabled' as const,
+							runtimeDispatchV3: {
+								mode: 'required',
+								trust: runtimeV3!.trust,
+								// The type has no 'none' literal — omitting the field is how
+								// isUnsignedRuntimeReadinessRpcV3 is told to accept nothing.
+								...(runtimeV3!.allowUnsignedPreactivationReadiness
+									? { unsignedReadiness: 'initialize-and-tools-list' as const }
+									: {}),
+							} satisfies RuntimeDispatchSecurityV3,
+						}
+					: {}),
 			}),
 		);
 	}
@@ -327,11 +379,12 @@ export async function serveApp(options: ServeAppOptions): Promise<ServeAppHandle
 		});
 	}
 
-	// Managed: warm the workload attestation in the background (the post-listen
-	// bootstrap the SDK's startHttpIngress does) and keep it fresh, so /ready
-	// reads a converged LAST-KNOWN-GOOD cache instead of forcing a synchronous
-	// broker token mint on every probe. dispose() stops the monitor.
-	if (mode === 'managed' && workloadIdentityClient) {
+	// Managed + runtime-v3 (when its broker socket is present): warm the
+	// workload attestation in the background (the post-listen bootstrap the
+	// SDK's startHttpIngress does) and keep it fresh, so /ready reads a
+	// converged LAST-KNOWN-GOOD cache instead of forcing a synchronous broker
+	// token mint on every probe. dispose() stops the monitor.
+	if ((mode === 'managed' || mode === 'runtime-v3') && workloadIdentityClient) {
 		void workloadIdentityClient.getEffectiveCapabilities({ forceRefresh: true }).catch(() => undefined);
 		workloadIdentityClient.startCapabilityMonitor(30_000);
 	}
@@ -398,6 +451,18 @@ function buildReadiness(input: {
 			};
 		};
 	}
+	if (input.mode === 'runtime-v3') {
+		// Trust is validated (RuntimeModeError otherwise) before the server ever
+		// starts listening, so by the time /ready is reachable it is always 200 —
+		// the driver never gates activation on this probe (it polls it AFTER
+		// flipping the installation ACTIVE, purely to observe workload posture).
+		const client = input.workloadIdentityClient;
+		return async () => ({
+			ok: true,
+			status: 200,
+			body: { mode: 'runtime-v3', workload: client ? workloadReadinessStatusV3(client.peekEffectiveCapabilities()) : 'unattested' },
+		});
+	}
 	if (input.mode === 'standalone-production') {
 		const check = createStandaloneReadinessCheck({
 			isRelayAuthenticated: () => input.relayRef.current?.isConnected() ?? false,
@@ -410,4 +475,11 @@ function buildReadiness(input: {
 	}
 	// development: trivial 200 — no trust to attest, unsigned local surface.
 	return async () => ({ ok: true, status: 200, body: { mode: 'development' } });
+}
+
+/** Collapses the workload client's five internal statuses onto the three runtime-v3 `/ready` reports. */
+function workloadReadinessStatusV3(capabilities: EffectiveCapabilities): 'unattested' | 'paired' | 'active' {
+	if (capabilities.status === 'active') return 'active';
+	if (capabilities.status === 'paired' || capabilities.status === 'stale') return 'paired';
+	return 'unattested';
 }

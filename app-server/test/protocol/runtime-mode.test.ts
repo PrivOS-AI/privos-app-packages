@@ -1,9 +1,15 @@
 import { describe, expect, it } from 'vitest';
 
 import { resolveRuntimeMode, RuntimeModeError } from '../../src/runtime-mode.js';
+import { RUNTIME_V3_PREACTIVATION_TRUST } from '../fixtures/runtime-v3-dispatch-trust-vector.js';
 
 const WORKLOAD_SOCKET_PATH = '/run/privos/identity.sock';
 const IDENTITY_FILE_PATH = '/app/privos-standalone-identity.json';
+const RUNTIME_V3_ENV = {
+	PRIVOS_RUNTIME_SECURITY_MODE: 'runtime-v3',
+	PRIVOS_RUNTIME_DISPATCH_TRUST_V3: JSON.stringify(RUNTIME_V3_PREACTIVATION_TRUST),
+	PRIVOS_RUNTIME_ALLOW_UNSIGNED_PREACTIVATION_READINESS: 'true',
+};
 
 describe('resolveRuntimeMode', () => {
 	it('resolves managed when only the workload socket is present', () => {
@@ -110,5 +116,76 @@ describe('resolveRuntimeMode', () => {
 		});
 		expect(result.mode).toBe('managed');
 		expect(result.workloadSocketPath).toBe(WORKLOAD_SOCKET_PATH);
+	});
+});
+
+describe('resolveRuntimeMode — runtime-v3 precedence', () => {
+	it('the driver env alone resolves runtime-v3 with the parsed trust attached', () => {
+		const result = resolveRuntimeMode({
+			env: RUNTIME_V3_ENV,
+			workloadSocketPath: WORKLOAD_SOCKET_PATH,
+			standaloneIdentityFilePath: IDENTITY_FILE_PATH,
+			workloadSocketExists: () => false,
+			standaloneIdentityExists: () => false,
+		});
+		expect(result.mode).toBe('runtime-v3');
+		expect(result.runtimeV3).toEqual({
+			trust: RUNTIME_V3_PREACTIVATION_TRUST,
+			allowUnsignedPreactivationReadiness: true,
+		});
+	});
+
+	it('the driver env plus a MANAGED workload socket still resolves runtime-v3 (socket is the outbound identity)', () => {
+		const result = resolveRuntimeMode({
+			env: RUNTIME_V3_ENV,
+			workloadSocketPath: WORKLOAD_SOCKET_PATH,
+			standaloneIdentityFilePath: IDENTITY_FILE_PATH,
+			workloadSocketExists: (path) => path === WORKLOAD_SOCKET_PATH,
+			standaloneIdentityExists: () => false,
+		});
+		expect(result.mode).toBe('runtime-v3');
+		expect(result.workloadSocketPath).toBe(WORKLOAD_SOCKET_PATH);
+	});
+
+	it('the driver env plus a standalone identity file is ambiguous — never a silent pick', () => {
+		try {
+			resolveRuntimeMode({
+				env: RUNTIME_V3_ENV,
+				workloadSocketPath: WORKLOAD_SOCKET_PATH,
+				standaloneIdentityFilePath: IDENTITY_FILE_PATH,
+				workloadSocketExists: () => false,
+				standaloneIdentityExists: (path) => path === IDENTITY_FILE_PATH,
+			});
+			expect.unreachable();
+		} catch (error) {
+			expect(error).toBeInstanceOf(RuntimeModeError);
+			expect((error as RuntimeModeError).code).toBe('AMBIGUOUS_RUNTIME_IDENTITY');
+		}
+	});
+
+	it('the driver env with an invalid trust value fails closed with RUNTIME_V3_TRUST_INVALID', () => {
+		try {
+			resolveRuntimeMode({
+				env: { ...RUNTIME_V3_ENV, PRIVOS_RUNTIME_DISPATCH_TRUST_V3: '{not-json' },
+				workloadSocketExists: () => false,
+				standaloneIdentityExists: () => false,
+			});
+			expect.unreachable();
+		} catch (error) {
+			expect(error).toBeInstanceOf(RuntimeModeError);
+			expect((error as RuntimeModeError).code).toBe('RUNTIME_V3_TRUST_INVALID');
+		}
+	});
+
+	it('absent the driver env, resolution is exactly the pre-existing behavior (managed)', () => {
+		const result = resolveRuntimeMode({
+			env: { NODE_ENV: 'production' },
+			workloadSocketPath: WORKLOAD_SOCKET_PATH,
+			standaloneIdentityFilePath: IDENTITY_FILE_PATH,
+			workloadSocketExists: (path) => path === WORKLOAD_SOCKET_PATH,
+			standaloneIdentityExists: () => false,
+		});
+		expect(result.mode).toBe('managed');
+		expect(result.runtimeV3).toBeUndefined();
 	});
 });

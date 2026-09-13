@@ -222,6 +222,15 @@ export type {
 } from './runtime-mode.js';
 
 export {
+	RUNTIME_V3_SECURITY_MODE_ENV_KEY,
+	RUNTIME_V3_TRUST_ENV_KEY,
+	RUNTIME_V3_ALLOW_UNSIGNED_READINESS_ENV_KEY,
+	isRuntimeV3SecurityModeEnv,
+	parseRuntimeV3Env,
+} from './runtime-v3-env.js';
+export type { RuntimeV3EnvConfig } from './runtime-v3-env.js';
+
+export {
 	DEFAULT_WORKLOAD_SOCKET,
 	WorkloadIdentityClient,
 	WorkloadIdentityError,
