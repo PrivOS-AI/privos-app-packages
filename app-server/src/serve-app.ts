@@ -51,6 +51,7 @@ import type { AppDescriptor } from './app-descriptor.js';
 import { createDirectRouter } from './direct/express-router.js';
 import { resolveHttpIngressListen, type ReadinessCheckResult } from './direct/http-ingress.js';
 import { setAdoptedAgentBotCredential } from './relay/agent-bot-credential.js';
+import { buildHubUserTokenAuthOptions } from './relay/hub-user-token-actor.js';
 import {
 	createAgentBotHubClient,
 	createAgentBotHubClientFromHubOrigin,
@@ -162,6 +163,17 @@ function defaultLogger(event: string, fields: Record<string, unknown>): void {
 function developmentHubOrigin(env: NodeJS.ProcessEnv): string | undefined {
 	const url = env.PRIVOS_URL;
 	return url && /^https?:\/\//.test(url) ? url.replace(/\/+$/, '') : undefined;
+}
+
+/**
+ * The Hub mints the user token with `aud = app.appId` (the manifest `name`,
+ * the descriptor's `id`) while dispatch trust pins `affinity.mcpAppId` (the Hub
+ * record `_id`); both identify this app and nothing else, so either is
+ * accepted — same rule as `connectRelay`. A lazy descriptor pins `mcpAppId` alone.
+ */
+function runtimeV3UserTokenAudience(mcpAppId: string, descriptor: ServeAppOptions['descriptor']): readonly string[] {
+	const manifestAppId = typeof descriptor === 'function' ? undefined : descriptor.id?.trim();
+	return manifestAppId && manifestAppId !== mcpAppId ? [mcpAppId, manifestAppId] : [mcpAppId];
 }
 
 /** Exported for `relay-client.ts`'s `connectRelay` default-manifest attach step (internal reuse, not part of the public API surface — not re-exported from `index.ts`). */
@@ -305,9 +317,23 @@ export async function serveApp(options: ServeAppOptions): Promise<ServeAppHandle
 				...(mode === 'managed' ? { workloadSecurity: 'required' as const, workloadIdentityClient } : {}),
 				// runtime-v3 never accepts the legacy managed dispatch header —
 				// its final-boundary authorization is `runtimeDispatchV3` instead.
+				// Caller identity is NOT in that assertion (only the managed-Cluster
+				// variant carries an actor claim): the Hub sends it as a separate
+				// RS256 user token in `Authorization: Bearer` + `X-MCP-User-Id`,
+				// verified against the Hub JWKS at the broker-attested origin. Before
+				// activation there is no attested origin, so a token is simply
+				// unverifiable (`identityState: 'invalid'`) — never a dispatch error.
 				...(mode === 'runtime-v3'
 					? {
 							workloadSecurity: 'disabled' as const,
+							auth: buildHubUserTokenAuthOptions({
+								hubOrigin: async () => {
+									const origin = await resolveHubOrigin();
+									if (!origin) throw new Error('No attested Hub origin yet for user-token verification.');
+									return origin;
+								},
+								audience: runtimeV3UserTokenAudience(runtimeV3!.trust.affinity.mcpAppId, options.descriptor),
+							}),
 							runtimeDispatchV3: {
 								mode: 'required',
 								trust: runtimeV3!.trust,

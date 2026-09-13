@@ -56,8 +56,12 @@ export function validateHubUserTokenOrigin(origin: string): string {
 }
 
 export interface HubUserTokenAuthOptions {
-	/** Config-time Hub origin — see {@link validateHubUserTokenOrigin}. */
-	hubOrigin: string;
+	/**
+	 * Config-time Hub origin — see {@link validateHubUserTokenOrigin}. A
+	 * resolver is for a runtime-v3 app, whose origin is only known once the
+	 * workload broker has attested it; it is validated on every resolution.
+	 */
+	hubOrigin: string | (() => string | Promise<string>);
 	/** This app's own `mcpAppId` — checked against the token's `aud` claim. */
 	audience: string | readonly string[] | (() => string | readonly string[]);
 	/** Default {@link DEFAULT_HUB_USER_TOKEN_JWKS_PATH}. */
@@ -76,8 +80,12 @@ export interface HubUserTokenAuthOptions {
  * the pointer at the correct, trusted origin.
  */
 export function buildHubUserTokenAuthOptions(input: HubUserTokenAuthOptions): AuthOptions {
-	const origin = validateHubUserTokenOrigin(input.hubOrigin);
-	const jwksUrl = new URL(input.jwksPath ?? DEFAULT_HUB_USER_TOKEN_JWKS_PATH, origin);
+	const jwksPath = input.jwksPath ?? DEFAULT_HUB_USER_TOKEN_JWKS_PATH;
+	const { hubOrigin } = input;
+	const jwksUrl =
+		typeof hubOrigin === 'function'
+			? async () => new URL(jwksPath, validateHubUserTokenOrigin(await hubOrigin()))
+			: new URL(jwksPath, validateHubUserTokenOrigin(hubOrigin));
 	return {
 		jwksUrl,
 		audience: input.audience,

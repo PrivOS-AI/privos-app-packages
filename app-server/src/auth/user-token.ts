@@ -10,7 +10,8 @@ import {
 import type { VerifiedActor } from '../context/tool-call-context.js';
 
 export interface AuthOptions {
-	jwksUrl: string | URL | (() => string | URL);
+	/** A resolver may be async: a runtime-v3 app learns its Hub origin from the workload broker, not at config time. */
+	jwksUrl: string | URL | (() => string | URL | Promise<string | URL>);
 	audience: string | readonly string[] | (() => string | readonly string[]);
 	issuer?: string | readonly string[];
 	clockToleranceSeconds?: number;
@@ -37,8 +38,8 @@ export type VerifyUserTokenResult =
 
 const jwksCache = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
 
-function resolveUrl(value: string | URL | (() => string | URL)): URL {
-	const raw = typeof value === 'function' ? value() : value;
+async function resolveUrl(value: AuthOptions['jwksUrl']): Promise<URL> {
+	const raw = typeof value === 'function' ? await value() : value;
 	return raw instanceof URL ? raw : new URL(raw);
 }
 
@@ -56,8 +57,8 @@ function resolveIssuer(value: string | readonly string[] | undefined): string | 
 	return [...value];
 }
 
-function getJwks(options: AuthOptions): ReturnType<typeof createRemoteJWKSet> {
-	const url = resolveUrl(options.jwksUrl);
+async function getJwks(options: AuthOptions): Promise<ReturnType<typeof createRemoteJWKSet>> {
+	const url = await resolveUrl(options.jwksUrl);
 	assertProductionSafeJwksUrl(url);
 	const cacheKey = `${url.toString()}|${options.jwksCacheTtlMs ?? ''}|${options.fetchTimeoutMs ?? ''}`;
 	let jwks = jwksCache.get(cacheKey);
@@ -82,7 +83,7 @@ export function clearJwksCache(): void {
 	jwksCache.clear();
 }
 
-function getVerifier(options: AuthOptions): JWTVerifyGetKey {
+async function getVerifier(options: AuthOptions): Promise<JWTVerifyGetKey> {
 	if (options.localJwks) {
 		return createLocalJWKSet(options.localJwks);
 	}
@@ -140,7 +141,7 @@ export async function verifyUserToken(
 	try {
 		const audience = resolveAudience(options.audience);
 		const issuer = resolveIssuer(options.issuer);
-		const { payload } = await jwtVerify(token, getVerifier(options), {
+		const { payload } = await jwtVerify(token, await getVerifier(options), {
 			audience,
 			algorithms: ['RS256'],
 			clockTolerance: options.clockToleranceSeconds ?? 30,

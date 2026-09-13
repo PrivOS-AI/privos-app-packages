@@ -1,8 +1,11 @@
+import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { exportJWK, generateKeyPair, SignJWT } from 'jose';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { AppDescriptor } from '../src/app-descriptor.js';
+import { DEFAULT_HUB_USER_TOKEN_JWKS_PATH } from '../src/relay/hub-user-token-actor.js';
 import { serveApp, type ServeAppHandle, type ServeAppOptions } from '../src/serve-app.js';
 import {
 	RUNTIME_V3_ACTIVE_TRUST,
@@ -193,5 +196,112 @@ describe('serveApp — runtime-v3 mode (real env → real router)', () => {
 		const res = await fetch(`${baseUrl(handle)}/ready`);
 		expect(res.status).toBe(200);
 		expect(await res.json()).toMatchObject({ ok: true, mode: 'runtime-v3', workload: 'active' });
+	});
+});
+
+// The Hub's `tools/call` for a locally executed app carries the caller as a
+// separate RS256 user token (`Authorization: Bearer` + `X-MCP-User-Id`,
+// `mcp-rpc-dispatcher.ts` → `sendHttpRpc`), minted with `aud = app.appId`;
+// the signed dispatch assertion itself has no actor claim. Until this was
+// wired, runtime-v3 never verified that token and every app saw no actor.
+describe('serveApp — runtime-v3 caller identity from the Hub user token', () => {
+	let jwks: { origin: string; close: () => Promise<void> } | undefined;
+	beforeEach(() => vi.stubEnv('NODE_ENV', 'test'));
+	afterEach(async () => {
+		await jwks?.close();
+		jwks = undefined;
+		vi.unstubAllEnvs();
+	});
+
+	// jose's remote JWKS client speaks Node's http stack directly, so a real loopback server stands in for the Hub.
+	async function hubWithJwks(): Promise<{ origin: string; mint: (aud: string) => Promise<string> }> {
+		const { privateKey, publicKey } = await generateKeyPair('RS256');
+		const jwk = { ...(await exportJWK(publicKey)), kid: 'hub-user-token-key', alg: 'RS256', use: 'sig' };
+		const server = http.createServer((req, res) => {
+			if (req.url !== DEFAULT_HUB_USER_TOKEN_JWKS_PATH) return void res.writeHead(404).end();
+			res.setHeader('content-type', 'application/json');
+			res.end(JSON.stringify({ keys: [jwk] }));
+		});
+		await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+		const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+		jwks = { origin, close: () => new Promise((resolve) => server.close(() => resolve())) };
+		const mint = (aud: string) =>
+			new SignJWT({ sub: 'user-1', preferred_username: 'alice' })
+				.setProtectedHeader({ alg: 'RS256', kid: 'hub-user-token-key' })
+				.setIssuedAt()
+				.setExpirationTime('300s')
+				.setAudience(aud)
+				.sign(privateKey);
+		return { origin, mint };
+	}
+
+	async function startActive(hubOrigin: string | undefined, seen: unknown[]): Promise<ServeAppHandle> {
+		const fakeClient = {
+			isAvailable: () => hubOrigin !== undefined,
+			peekEffectiveCapabilities: () => ({ status: 'active', scopes: [], updatedAt: Date.now() }),
+			getEffectiveCapabilities: async () => ({ status: 'active', scopes: [], updatedAt: Date.now() }),
+			brokerContext: async () => ({ hubOrigin, hubKid: 'k', hubPublicJwk: {}, binding: {} }),
+			startCapabilityMonitor: () => () => {},
+			dispose: () => {},
+		};
+		return start({
+			descriptor,
+			createHandler: () => async (_rpc, context) => {
+				seen.push({ identityState: context.identityState, actor: context.actor });
+				return { ok: true };
+			},
+			port: 0,
+			installSignalHandlers: false,
+			logger: () => {},
+			__test: {
+				env: runtimeV3Env(RUNTIME_V3_ACTIVE_TRUST, false),
+				// eslint-disable-next-line @typescript-eslint/no-explicit-any
+				getWorkloadIdentityClient: (() => fakeClient) as any,
+			},
+		});
+	}
+
+	async function signedToolsCall(handle: ServeAppHandle, token: string): Promise<Response> {
+		const body = { jsonrpc: '2.0', id: 11, method: 'tools/call', params: { name: 'hr_whoami', arguments: {} } };
+		const compact = signRuntimeV3DispatchAssertion({ trust: RUNTIME_V3_ACTIVE_TRUST, body, now: Math.floor(Date.now() / 1000) });
+		return fetch(`${baseUrl(handle)}/mcp`, {
+			method: 'POST',
+			headers: {
+				'content-type': 'application/json',
+				'X-PrivOS-MCP-Dispatch-Assertion': compact,
+				'Authorization': `Bearer ${token}`,
+				'X-MCP-User-Id': 'user-1',
+			},
+			body: JSON.stringify(body),
+		});
+	}
+
+	it('verifies the Hub user token against the JWKS at the broker-attested origin and hands the handler a verified actor', async () => {
+		const hub = await hubWithJwks();
+		const seen: unknown[] = [];
+		const handle = await startActive(hub.origin, seen);
+		const res = await signedToolsCall(handle, await hub.mint(descriptor.id));
+		expect(res.status).toBe(200);
+		expect(seen).toEqual([
+			{ identityState: 'verified', actor: expect.objectContaining({ userId: 'user-1', username: 'alice', provenance: 'user-token' }) },
+		]);
+	});
+
+	it('a token minted for another app is refused: dispatch still runs, with no actor', async () => {
+		const hub = await hubWithJwks();
+		const seen: unknown[] = [];
+		const handle = await startActive(hub.origin, seen);
+		const res = await signedToolsCall(handle, await hub.mint('some-other-app'));
+		expect(res.status).toBe(200);
+		expect(seen).toEqual([{ identityState: 'invalid', actor: undefined }]);
+	});
+
+	it('with no attested Hub origin yet the token is unverifiable, never a dispatch failure', async () => {
+		const hub = await hubWithJwks();
+		const seen: unknown[] = [];
+		const handle = await startActive(undefined, seen);
+		const res = await signedToolsCall(handle, await hub.mint(descriptor.id));
+		expect(res.status).toBe(200);
+		expect(seen).toEqual([{ identityState: 'invalid', actor: undefined }]);
 	});
 });
