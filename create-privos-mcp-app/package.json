@@ -1,6 +1,6 @@
 {
   "name": "create-privos-mcp-app",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "CLI scaffolder for Privos MCP apps",
   "license": "MIT",
   "author": "PrivOS",
