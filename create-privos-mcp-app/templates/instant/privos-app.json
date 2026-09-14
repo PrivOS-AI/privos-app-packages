@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "kind": "mcp-app",
   "name": "{{APP_ID}}",
   "version": "1.0.0",

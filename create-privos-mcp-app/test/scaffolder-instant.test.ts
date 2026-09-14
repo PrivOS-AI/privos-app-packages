@@ -50,6 +50,12 @@ describe('scaffoldApp — --template instant', () => {
 			fs.readFileSync(path.join(workDir, 'demo-app', 'privos-app.json'), 'utf-8'),
 		) as Record<string, unknown>;
 
+		// The Marketplace v3 install protocol (privos-portal's
+		// `marketplaceV3ProposalSnapshotFromPreflight`) only ever proposes an
+		// install from a schema-v3 manifest — INSTANT is a v3-protocol-only
+		// concept, so a scaffolded app that shipped an older schema version
+		// could never actually be installed through it.
+		expect(manifest.schemaVersion).toBe(3);
 		expect(manifest.executionMode).toBe('INSTANT');
 		expect(manifest.name).toBe('com.privos.demo-app');
 		expect(manifest.tools).toBeUndefined();
