@@ -500,6 +500,52 @@ wired automatically once `UiResourceProvider.readAsset` / `readAssetsManifest` a
 exported for callers that need to validate or derive asset identifiers outside `serveBuiltUi`
 itself.
 
+## CLI: `privos-app bundle-ui`
+
+Marketplace UI is served from the tenant Hub's MinIO, ingested from a Portal-signed bundle at
+install/upgrade time — the runtime is never read for UI bytes once an install is ACTIVE. The bundle
+is produced with:
+
+```bash
+npx privos-app bundle-ui --dist ./dist --out ./ui-bundle.tar
+```
+
+`bundle-ui` renders the shell with the **exact same code `serveBuiltUi` uses at runtime**
+(`renderShell` — opt-in `privos-ui-assets` meta + boot watchdog) and builds the assets manifest with
+the same `buildAssetsManifest`, so the bundle and what the app serves live are always byte-identical.
+It writes a deterministic USTAR tar (`shell.html`, `assets-manifest.json`, `assets/*`, sorted
+entries, zero mtime/uid/gid) — two builds of the same input hash the same. A single-file UI (no
+`assets/` directory) is valid: the manifest is `{ files: [] }` and the tar carries only the two
+required entries.
+
+- `--dist <dir>` — defaults to `ui.distDir` in `privos-app.json` (relative to the manifest), or
+  `./dist` — the same directory every scaffolder template and `serveBuiltUi` example uses.
+- `--out <file>` — write the tar to disk.
+- `--check` — validate only (build + budgets); never writes `--out`, even when both are given. Used
+  by `privos-app lint --publish`. The build node's `ui-build` stage runs the full command (it needs
+  the real tar) and separately re-validates the produced artifact's shape with its own script.
+
+Budgets enforced: ≤ 2 MB per file, ≤ 256 files total, ≤ 64 MB total bundle size. The build node
+(`infra/build-node`'s `ui-build` stage) runs the creator's `npm ci && npm run build` in one sandboxed,
+network-isolated container stage, then runs `bundle-ui` in a **separate** stage that starts fresh from
+the same pinned base image and receives only the built `dist/` output — never the build stage's
+filesystem, npm config, or PATH, so nothing the creator's own build did can influence which
+`@privos_ai/app-server` version `bundle-ui` resolves or how it runs. That second stage invokes
+`npx --yes -p @privos_ai/app-server@<pinned version> privos-app bundle-ui` — `-p` is required: a
+plain `npx --yes @privos_ai/app-server <bin>` cannot pick a bin among this package's two (`privos-app`,
+`privos-app-lint`) and fails closed. The build node re-validates the output shape (reading the tar's
+member headers directly, never extracting it) before handing the artifact to the Portal — nothing
+from `dist/` reaches the Hub except through this bundle.
+
+`privos-app lint --publish` additionally enforces `ui.shellMode` (`static` — default, and the only
+value a bundled shell ever serves live traffic under — or `live`) and rejects `shellMode: "live"` for
+`executionMode: "INSTANT"` apps: an INSTANT app has no runtime, so nothing could ever serve a
+per-user shell for it. Declare `ui.shellMode: "live"` **only** when the shell itself embeds per-user
+data (its assets still ship through `bundle-ui` either way) — the lint also rejects a built shell
+containing per-user template markers (generic `{{…}}`, `<%…%>`, `${user…}`, `__USER__`-style) or
+JWT-shaped tokens outside `<script>` bodies (a JWT is rejected everywhere, including inside a
+script), since a bundled shell is served statically and identically to every user.
+
 ## Manifest v2 preflight
 
 ```bash
@@ -513,6 +559,9 @@ The command rejects mixed legacy/v2 permission declarations and prints determini
 publisher declaration only; Hub/Portal compute the authoritative permission contract hash with
 the versioned server-owned catalog and immutable image digest. `privos-app-lint` is kept as a
 compatibility alias for `privos-app lint` — same output, same exit code.
+
+`privos-app lint --publish` additionally runs the `bundle-ui` check described below — see
+[CLI: `privos-app bundle-ui`](#cli-privos-app-bundle-ui).
 
 ## CLI: `privos-app publish`
 

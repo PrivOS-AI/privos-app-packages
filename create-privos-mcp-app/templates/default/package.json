@@ -10,6 +10,7 @@
     "build": "vite build && tsc -p tsconfig.server.json",
     "start": "node dist-server/server.js",
     "manifest:lint": "privos-app lint",
+    "bundle:ui": "privos-app bundle-ui --out ui-bundle.tar",
     "publish:marketplace": "privos-app publish"
   },
   "dependencies": {

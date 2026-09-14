@@ -331,3 +331,14 @@ export {
 } from './ui/asset-filename-rule.js';
 export type { McpUiAssetExtension } from './ui/asset-filename-rule.js';
 export type { AssetManifestEntry, AssetsManifest } from './ui/assets-manifest.js';
+export { renderShell } from './ui/render-shell.js';
+export {
+	buildUiBundle,
+	UiBundleError,
+	UI_BUNDLE_MAX_FILE_BYTES,
+	UI_BUNDLE_MAX_FILES,
+	UI_BUNDLE_MAX_TOTAL_BYTES,
+} from './ui/bundle-ui.js';
+export type { BuildUiBundleOptions, UiBundleErrorCode, UiBundleFileEntry, UiBundleResult } from './ui/bundle-ui.js';
+export { lintPublishUiBundle, UI_SHELL_MODES } from './manifest-lint-publish.js';
+export type { LintPublishResult, UiShellMode } from './manifest-lint-publish.js';

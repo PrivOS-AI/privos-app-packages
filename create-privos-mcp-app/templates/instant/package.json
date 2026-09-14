@@ -7,8 +7,9 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "manifest:lint": "npx --yes @privos_ai/app-server privos-app-lint",
-    "publish:marketplace": "npx --yes @privos_ai/app-server privos-app publish"
+    "manifest:lint": "npx --yes -p @privos_ai/app-server privos-app-lint",
+    "bundle:ui": "npx --yes -p @privos_ai/app-server privos-app bundle-ui --out ui-bundle.tar",
+    "publish:marketplace": "npx --yes -p @privos_ai/app-server privos-app publish"
   },
   "devDependencies": {
     "@privos_ai/app-react": "^0.3.0",

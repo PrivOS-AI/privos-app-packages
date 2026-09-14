@@ -87,3 +87,56 @@ describe('runLint — INSTANT dispatch', () => {
 		expect(output.warnings?.[0]).toContain('Dockerfile is present');
 	});
 });
+
+describe('runLint --publish', () => {
+	let workDir: string;
+	let manifestPath: string;
+	let logSpy: ReturnType<typeof vi.spyOn>;
+
+	beforeEach(() => {
+		workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'privos-app-lint-publish-cli-test-'));
+		manifestPath = path.join(workDir, 'privos-app.json');
+		logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+	});
+
+	afterEach(() => {
+		logSpy.mockRestore();
+		fs.rmSync(workDir, { recursive: true, force: true });
+	});
+
+	it('does not run the publish rule set without --publish, even for a manifest that would fail it', () => {
+		fs.writeFileSync(manifestPath, JSON.stringify({ ...validInstantManifest, ui: { ...validInstantManifest.ui, shellMode: 'not-a-mode' } }));
+		expect(runLint([manifestPath])).toBe(0);
+	});
+
+	it('exits 1 and names ui.shellMode when --publish is given an invalid value', () => {
+		fs.writeFileSync(manifestPath, JSON.stringify({ ...validInstantManifest, ui: { ...validInstantManifest.ui, shellMode: 'not-a-mode' } }));
+		expect(runLint([manifestPath, '--publish'])).toBe(1);
+		const output = JSON.parse(logSpy.mock.calls[0]![0] as string) as { errors: string[] };
+		expect(output.errors.some((error) => error.includes('ui.shellMode must be one of'))).toBe(true);
+	});
+
+	it('exits 1 with --publish when an INSTANT manifest declares ui.shellMode: "live"', () => {
+		fs.writeFileSync(manifestPath, JSON.stringify({ ...validInstantManifest, ui: { ...validInstantManifest.ui, shellMode: 'live' } }));
+		expect(runLint([manifestPath, '--publish'])).toBe(1);
+		const output = JSON.parse(logSpy.mock.calls[0]![0] as string) as { errors: string[] };
+		expect(output.errors.some((error) => error.includes('not allowed for executionMode: "INSTANT"'))).toBe(true);
+	});
+
+	it('exits 1 with --publish when the declared UI has no bundle-able dist/ output', () => {
+		fs.writeFileSync(manifestPath, JSON.stringify(validInstantManifest));
+		expect(runLint([manifestPath, '--publish'])).toBe(1);
+		const output = JSON.parse(logSpy.mock.calls[0]![0] as string) as { errors: string[] };
+		expect(output.errors.some((error) => error.startsWith('bundle-ui check failed'))).toBe(true);
+	});
+
+	it('exits 0 with --publish when the declared UI bundles cleanly', () => {
+		fs.mkdirSync(path.join(workDir, 'dist'));
+		fs.writeFileSync(
+			path.join(workDir, 'dist', 'index.html'),
+			'<!doctype html><html><head><meta charset="utf-8"></head><body><div id="root"></div></body></html>\n',
+		);
+		fs.writeFileSync(manifestPath, JSON.stringify(validInstantManifest));
+		expect(runLint([manifestPath, '--publish'])).toBe(0);
+	});
+});

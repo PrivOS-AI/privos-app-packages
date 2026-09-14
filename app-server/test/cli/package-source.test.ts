@@ -11,6 +11,7 @@ import {
 	ENTRY_LIMIT,
 	MAX_FILE_BYTES,
 	findCredentialLikeFiles,
+	isDeniedArchiveEntry,
 } from '../../src/cli/lib/package-source.js';
 import { createGitFixtureRepo, removeFixtureRepo, standardAppFixtureFiles, writeFixtureFile } from './support/git-fixture-repo.js';
 
@@ -144,6 +145,20 @@ describe('evaluateArchiveEntries — entry policy limits (pure, no git needed)',
 		for (const deniedName of ['node_modules/pkg/index.js', '.env', '.env.local', '../outside.txt', 'secrets/id_rsa', 'a.pem', 'a.key']) {
 			expect(() => evaluateArchiveEntries([...base, { name: deniedName, uncompressedSize: 10, isDirectory: false }])).toThrowError(PackagePolicyError);
 		}
+	});
+
+	it('rejects a ui-bundle.tar build artifact wherever it sits in the tree (L3)', () => {
+		const base = [
+			{ name: 'privos-app.json', uncompressedSize: 10, isDirectory: false },
+			{ name: 'Dockerfile', uncompressedSize: 10, isDirectory: false },
+		];
+		for (const path of ['ui-bundle.tar', 'dist-bundle/ui-bundle.tar', 'nested/dir/ui-bundle.tar']) {
+			expect(isDeniedArchiveEntry(path)).toBe(true);
+			expect(() => evaluateArchiveEntries([...base, { name: path, uncompressedSize: 10, isDirectory: false }])).toThrowError(PackagePolicyError);
+		}
+		// A same-named directory or an unrelated .tar file must not be swept up by the same rule.
+		expect(isDeniedArchiveEntry('ui-bundle.tar.example')).toBe(false);
+		expect(isDeniedArchiveEntry('other-bundle.tar')).toBe(false);
 	});
 
 	it('accepts a well-formed entry list', () => {

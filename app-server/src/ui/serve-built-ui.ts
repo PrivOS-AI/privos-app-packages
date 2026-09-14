@@ -4,14 +4,10 @@ import path from 'node:path';
 import type { UiAssetContent } from '../runtime.js';
 import { deriveAssetUriPrefix } from './asset-filename-rule.js';
 import { buildAssetsManifest, type AssetsManifest } from './assets-manifest.js';
-import { MCP_UI_SHELL_WATCHDOG_SCRIPT } from './shell-watchdog.js';
+import { isContainedIn } from './path-containment.js';
+import { renderShell } from './render-shell.js';
 
 const TEXT_ASSET_EXTENSIONS = new Set(['js', 'css', 'svg', 'json']);
-const PRIVOS_UI_ASSETS_META = '<meta name="privos-ui-assets" content="relay">';
-const PRIVOS_UI_ASSETS_META_RE =
-	/<meta\b[^>]*\bname\s*=\s*["']privos-ui-assets["'][^>]*\bcontent\s*=\s*["']relay["']|<meta\b[^>]*\bcontent\s*=\s*["']relay["'][^>]*\bname\s*=\s*["']privos-ui-assets["']/i;
-const ASSET_TAG_RE = /<(script|link)\b[^>]*>/gi;
-const SRC_OR_HREF_RE = /\b(?:src|href)\s*=\s*(["'])(.*?)\1/i;
 
 export interface ServeBuiltUiOptions {
 	/** Absolute path to the Vite build output directory containing `index.html`, `assets/`, `.vite/manifest.json`. */
@@ -50,7 +46,7 @@ export function serveBuiltUi(options: ServeBuiltUiOptions): ServeBuiltUi {
 	const manifestFiles = new Map(manifest.files.map((file) => [file.name, file]));
 
 	const assetsDirRealpath = fs.existsSync(assetsDir) ? fs.realpathSync(assetsDir) : undefined;
-	const html = renderShellHtml(distDir);
+	const html = renderShell(distDir);
 	const assetCache = new Map<string, UiAssetContent>();
 
 	return {
@@ -89,70 +85,3 @@ export function serveBuiltUi(options: ServeBuiltUiOptions): ServeBuiltUi {
 	};
 }
 
-function isContainedIn(dirRealpath: string, fileRealpath: string): boolean {
-	const relative = path.relative(dirRealpath, fileRealpath);
-	return relative !== '' && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
-}
-
-function renderShellHtml(distDir: string): string {
-	const indexPath = path.join(distDir, 'index.html');
-	let raw: string;
-	try {
-		raw = fs.readFileSync(indexPath, 'utf8');
-	} catch (err) {
-		throw new Error(`serveBuiltUi: cannot read ${indexPath}: ${(err as Error).message}`);
-	}
-
-	assertRelativeAssetTags(raw, indexPath);
-
-	let html = raw;
-	if (!PRIVOS_UI_ASSETS_META_RE.test(html)) {
-		html = injectIntoHead(html, `  ${PRIVOS_UI_ASSETS_META}\n`, { atStart: false });
-	}
-	html = injectIntoHead(html, `  <script>${MCP_UI_SHELL_WATCHDOG_SCRIPT}</script>\n`, { atStart: true });
-	return html;
-}
-
-/**
- * Every `<script src>` / `<link href>` in the shell must be relative
- * (`./assets/…` or `assets/…`). An absolute or external reference means the
- * app was built without Vite `base: './'` and would resolve against the
- * wrong origin once the tab renders it — fail construction, not the frame.
- */
-function assertRelativeAssetTags(html: string, indexPath: string): void {
-	const offenders: string[] = [];
-	ASSET_TAG_RE.lastIndex = 0;
-	let tagMatch: RegExpExecArray | null;
-	while ((tagMatch = ASSET_TAG_RE.exec(html))) {
-		const tag = tagMatch[0];
-		const refMatch = SRC_OR_HREF_RE.exec(tag);
-		if (!refMatch) continue;
-		const ref = refMatch[2];
-		if (ref && (ref.startsWith('./assets/') || ref.startsWith('assets/'))) continue;
-		offenders.push(tag.length > 120 ? `${tag.slice(0, 117)}...` : tag);
-	}
-	if (offenders.length > 0) {
-		throw new Error(
-			`serveBuiltUi: ${indexPath} has non-relative asset references — build with Vite base: './':\n${offenders
-				.map((o) => `  - ${o}`)
-				.join('\n')}`,
-		);
-	}
-}
-
-function injectIntoHead(html: string, snippet: string, opts: { atStart: boolean }): string {
-	if (opts.atStart) {
-		const headOpen = /<head[^>]*>/i.exec(html);
-		if (headOpen) {
-			const insertAt = headOpen.index + headOpen[0].length;
-			return `${html.slice(0, insertAt)}\n${snippet}${html.slice(insertAt)}`;
-		}
-	} else {
-		const headCloseIdx = html.search(/<\/head>/i);
-		if (headCloseIdx !== -1) {
-			return html.slice(0, headCloseIdx) + snippet + html.slice(headCloseIdx);
-		}
-	}
-	// No <head> tag found in a well-formed Vite build — fall back to prepending.
-	return snippet + html;
-}

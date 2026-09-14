@@ -65,6 +65,12 @@ const DENIED_DIR_PATTERN = /(^|\/)(node_modules|dist|dist-source|\.recyclebin|\.
 const DENIED_ENV_PATTERN = /(^|\/)\.env(\.|$)/;
 const PARENT_TRAVERSAL_PATTERN = /\.\./;
 const CREDENTIAL_ENTRY_PATTERN = /(^|\/)id_rsa|\.pem$|\.key$/;
+// `privos-app bundle-ui`'s conventional output filename — a build artifact,
+// never source, so `--allow-dirty` (which snapshots untracked files too via
+// `git add --all`) must never sweep a leftover one into the reviewed
+// archive. Matched by exact basename wherever it sits in the tree, not just
+// the top level, since `--out` accepts any path.
+const UI_BUNDLE_ARTIFACT_PATTERN = /(^|\/)ui-bundle\.tar$/;
 
 export function isDeniedArchiveEntry(entryName: string): boolean {
 	return (
@@ -72,6 +78,7 @@ export function isDeniedArchiveEntry(entryName: string): boolean {
 		|| DENIED_ENV_PATTERN.test(entryName)
 		|| PARENT_TRAVERSAL_PATTERN.test(entryName)
 		|| CREDENTIAL_ENTRY_PATTERN.test(entryName)
+		|| UI_BUNDLE_ARTIFACT_PATTERN.test(entryName)
 		|| entryName.toLowerCase().includes('credentials')
 	);
 }
