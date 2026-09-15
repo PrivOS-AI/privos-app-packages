@@ -38,6 +38,8 @@ export type PackageSourceOptions = Readonly<{
 	allowDirty: boolean;
 	/** Relative to the git worktree root. Defaults to `dist-source`. */
 	outputDir?: string;
+	/** Manifest `executionMode`; INSTANT archives need no Dockerfile. */
+	executionMode?: string;
 }>;
 
 export type ZipEntry = Readonly<{ name: string; uncompressedSize: number; isDirectory: boolean }>;
@@ -58,7 +60,11 @@ export type PackageSourceResult = Readonly<{
 export const ENTRY_LIMIT = 20_000;
 export const MAX_FILE_BYTES = 50 * 1024 * 1024;
 export const MAX_TOTAL_BYTES = 200 * 1024 * 1024;
-const REQUIRED_ROOT_ENTRIES = ['privos-app.json', 'Dockerfile'] as const;
+const REQUIRED_ROOT_ENTRIES = ['privos-app.json'] as const;
+// A container image is built from the Dockerfile for every execution mode
+// except INSTANT: an INSTANT app ships UI only (the build node runs
+// `privos-app bundle-ui`), has no image and must not need a Dockerfile.
+const CONTAINER_BUILD_ENTRY = 'Dockerfile';
 
 // Mirrors the awk rules in `scripts/package-source.sh`'s `bad_entries` check.
 const DENIED_DIR_PATTERN = /(^|\/)(node_modules|dist|dist-source|\.recyclebin|\.git)(\/|$)|(^|\/)\.privos\/skills(\/|$)/;
@@ -127,11 +133,12 @@ export function readZipCentralDirectoryEntries(buffer: Buffer): ZipEntry[] {
 }
 
 /** Pure policy evaluation over an already-read entry list — kept separate from I/O for fast unit tests. */
-export function evaluateArchiveEntries(entries: readonly ZipEntry[]): void {
+export function evaluateArchiveEntries(entries: readonly ZipEntry[], executionMode?: string): void {
 	const names = entries.map((entry) => entry.name);
-	for (const required of REQUIRED_ROOT_ENTRIES) {
-		if (!names.includes(required)) {
-			throw new PackagePolicyError(`Archive is missing required root entry: ${required}`, 'MISSING_REQUIRED_ENTRY', [required]);
+	const required = executionMode === 'INSTANT' ? [...REQUIRED_ROOT_ENTRIES] : [...REQUIRED_ROOT_ENTRIES, CONTAINER_BUILD_ENTRY];
+	for (const requiredEntry of required) {
+		if (!names.includes(requiredEntry)) {
+			throw new PackagePolicyError(`Archive is missing required root entry: ${requiredEntry}`, 'MISSING_REQUIRED_ENTRY', [requiredEntry]);
 		}
 	}
 	const denied = names.filter(isDeniedArchiveEntry);
@@ -263,7 +270,7 @@ export function packageSource(options: PackageSourceOptions): PackageSourceResul
 	const archiveBuffer = fs.readFileSync(archivePath);
 	try {
 		const zipEntries = readZipCentralDirectoryEntries(archiveBuffer);
-		evaluateArchiveEntries(zipEntries);
+		evaluateArchiveEntries(zipEntries, options.executionMode);
 		if (archiveBuffer.length > MAX_TOTAL_BYTES) {
 			throw new PackagePolicyError(`Archive is ${archiveBuffer.length} bytes; marketplace limit is ${MAX_TOTAL_BYTES} bytes.`, 'TOTAL_SIZE_EXCEEDED');
 		}

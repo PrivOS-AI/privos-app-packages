@@ -200,3 +200,27 @@ describe('packageSource — repository resolution', () => {
 		expect(result.gitRevision).toMatch(/^[0-9a-f]{40}$/);
 	});
 });
+
+describe('evaluateArchiveEntries — Dockerfile requirement by execution mode (pure)', () => {
+	const entry = (name: string) => ({ name, uncompressedSize: 10, isDirectory: false });
+
+	it('accepts an INSTANT archive without a Dockerfile', () => {
+		expect(() => evaluateArchiveEntries([entry('privos-app.json'), entry('package.json')], 'INSTANT')).not.toThrow();
+	});
+
+	it('still requires a Dockerfile when the execution mode is not INSTANT', () => {
+		for (const executionMode of [undefined, 'PRIVOS_MANAGED_RUNTIME', 'SELF_HOSTED_LOCAL']) {
+			try {
+				evaluateArchiveEntries([entry('privos-app.json'), entry('package.json')], executionMode);
+				expect.unreachable(`expected MISSING_REQUIRED_ENTRY for ${String(executionMode)}`);
+			} catch (error) {
+				expect((error as PackagePolicyError).code).toBe('MISSING_REQUIRED_ENTRY');
+				expect((error as PackagePolicyError).details).toEqual(['Dockerfile']);
+			}
+		}
+	});
+
+	it('requires privos-app.json for INSTANT archives too', () => {
+		expect(() => evaluateArchiveEntries([entry('package.json')], 'INSTANT')).toThrowError(PackagePolicyError);
+	});
+});

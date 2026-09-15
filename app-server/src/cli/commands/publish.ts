@@ -105,7 +105,8 @@ export async function runPublish(argv: readonly string[], runtime: PublishRuntim
 		const version = String(manifest.version);
 
 		// Step 2: package (refuse dirty tree unless --allow-dirty; entry policy enforced inside).
-		const packaged = packageOrThrow(cwd, name, version, Boolean(values['allow-dirty']));
+		const executionMode = typeof manifest.executionMode === 'string' ? manifest.executionMode : undefined;
+		const packaged = packageOrThrow(cwd, name, version, Boolean(values['allow-dirty']), executionMode);
 		reporter.emit({
 			event: 'package',
 			archivePath: packaged.archivePath,
@@ -227,9 +228,9 @@ export async function runPublish(argv: readonly string[], runtime: PublishRuntim
 	}
 }
 
-function packageOrThrow(cwd: string, name: string, version: string, allowDirty: boolean) {
+function packageOrThrow(cwd: string, name: string, version: string, allowDirty: boolean, executionMode?: string) {
 	try {
-		return packageSource({ cwd, name, version, allowDirty });
+		return packageSource({ cwd, name, version, allowDirty, executionMode });
 	} catch (error) {
 		if (error instanceof PackagePolicyError) {
 			const exitCode = error.code === 'NOT_GIT_REPOSITORY' || error.code === 'GIT_ARCHIVE_FAILED' ? 5 : 2;
