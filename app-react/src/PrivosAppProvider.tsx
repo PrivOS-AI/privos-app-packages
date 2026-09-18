@@ -57,6 +57,36 @@ export interface UploadFileParams {
 	duplicateAction?: 'replace' | 'keep_both' | 'cancel';
 }
 
+export type MicrophoneDenialReason =
+	/** The tool's `_meta.ui.permissions` does not list `microphone`. */
+	| 'not_declared'
+	/** Not called from a click/keypress handler (or too long after one). */
+	| 'user_activation_required'
+	/** The user blocked the hub's per-app prompt, or the browser refused the microphone. */
+	| 'denied'
+	/** No microphone / no audio support on this device. */
+	| 'unavailable'
+	/** This hub predates host-brokered devices — fall back to `navigator.mediaDevices.getUserMedia`. */
+	| 'unsupported_host';
+
+export interface MicrophoneOptions {
+	/** Preferred sample rate in Hz (e.g. 16000). The grant reports the rate actually delivered. */
+	sampleRate?: number;
+	echoCancellation?: boolean;
+	noiseSuppression?: boolean;
+	autoGainControl?: boolean;
+	/** Mono signed 16-bit PCM frames at the granted `sampleRate`. */
+	onData: (chunk: Int16Array) => void;
+	/** Capture ended without `stop()` (device unplugged, permission revoked). */
+	onEnded?: (reason: string) => void;
+}
+
+export type MicrophoneStartResult =
+	| { granted: true; streamId: string; sampleRate: number; encoding: 'pcm_s16le'; channels: 1; stop: () => void }
+	| { granted: false; reason: MicrophoneDenialReason };
+
+export type WakeLockResult = { granted: true } | { granted: false; reason: 'not_declared' | 'denied' | 'unavailable' | 'unsupported_host' };
+
 /** Host-mediated, per-app persistent key/value store (see `McpApp.storage`). */
 export interface AppStorage {
 	/** The stored string for `key`, or `null` if never set. */
@@ -123,6 +153,28 @@ export interface McpApp {
 	setProviderEmbedRect(embedId: string, rect: ProviderEmbedRect): void;
 	/** Give up an embed. Fire-and-forget; the host also drops everything on document reload. */
 	teardownProviderEmbed(embedId: string): void;
+	/**
+	 * Capture the microphone through the host.
+	 *
+	 * This document runs in an opaque origin, where browsers refuse `getUserMedia` even though the
+	 * iframe delegates `microphone`. The host captures under its own origin (the browser prompt names
+	 * the hub) and streams mono PCM16 frames to `onData`. Requires `microphone` in the tool's
+	 * `_meta.ui.permissions` and must be called from a user gesture (click/keypress handler).
+	 *
+	 * A refusal resolves `{ granted: false, reason }`; on `unsupported_host` fall back to
+	 * `getUserMedia`. One capture per document — starting again replaces the previous one (its
+	 * `onEnded('replaced')` fires). `onEnded('document_reloaded')` means the host reset the frame.
+	 * Optional so custom `McpApp` implementations predating it still type-check.
+	 */
+	startMicrophone?(options: MicrophoneOptions): Promise<MicrophoneStartResult>;
+	/**
+	 * Keep the screen awake through the host (Wake Lock is refused to this opaque origin too).
+	 * Requires `screen-wake-lock` in `_meta.ui.permissions`. The host re-acquires it when the page
+	 * becomes visible again, until `releaseWakeLock()`.
+	 */
+	requestWakeLock?(): Promise<WakeLockResult>;
+	/** Let the screen sleep again. Fire-and-forget. */
+	releaseWakeLock?(): void;
 	onhostcontextchanged?: (ctx: any) => void;
 	/**
 	 * The host (re)initialized this iframe. Anything the host tracks per mount — notably chat
@@ -193,6 +245,9 @@ interface PrivosAppProviderProps {
 // attaches `onhostcontextchanged`, the buffered context is replayed to it.
 // ---------------------------------------------------------------------------
 let bufferedHostContext: any | undefined;
+// `hostCapabilities` from the host's `ui/initialize`, which also fires before React mounts.
+// Undefined = no handshake seen yet, so brokered calls are attempted rather than refused.
+let bufferedHostCapabilities: Record<string, unknown> | undefined;
 let activeContextHandler: ((ctx: any) => void) | undefined;
 
 /**
@@ -233,6 +288,10 @@ if (typeof window !== 'undefined') {
 		if (event.source !== window.parent) return;
 		const data = event.data;
 		if (!data || data.jsonrpc !== '2.0') return;
+		if (data.method === 'ui/initialize') {
+			bufferedHostCapabilities = data.params?.hostCapabilities ?? {};
+			return;
+		}
 		if (data.method !== 'HOST_CONTEXT_CHANGED') return;
 
 		bufferedHostContext = data.params;
@@ -269,8 +328,13 @@ function createDefaultApp(): McpApp {
 	const initializeSubscribers = new Set<() => void>();
 	let chatOpenHandler: (() => void) | undefined;
 	let chatCloseHandler: ((reason: string) => void) | undefined;
+	const microphoneHandlers = new Map<string, Pick<MicrophoneOptions, 'onData' | 'onEnded'>>();
+	// Re-requested after every host (re)initialize: the host drops the lock on a document reload.
+	let wakeLockWanted = false;
+	const hostLacks = (capability: string) => bufferedHostCapabilities !== undefined && !bufferedHostCapabilities[capability];
 
 	const notifyHostInitialize = () => {
+		if (wakeLockWanted) sendRequest('host/wakeLock.request', {}, 10_000).catch(() => undefined);
 		initializeHandler?.();
 		// Copied before iterating: a handler may unsubscribe itself while re-claiming.
 		[...initializeSubscribers].forEach((handler) => handler());
@@ -291,6 +355,13 @@ function createDefaultApp(): McpApp {
 				if (data.method === 'ui/initialize') notifyHostInitialize();
 				else if (data.method === 'ui/chat.open') chatOpenHandler?.();
 				else if (data.method === 'ui/chat.close') chatCloseHandler?.(String(data.params?.reason ?? ''));
+				else if (data.method === 'ui/microphone.data' && data.params?.pcm instanceof ArrayBuffer) {
+					microphoneHandlers.get(data.params.streamId)?.onData(new Int16Array(data.params.pcm));
+				} else if (data.method === 'ui/microphone.ended') {
+					const handlers = microphoneHandlers.get(data.params?.streamId);
+					microphoneHandlers.delete(data.params?.streamId);
+					handlers?.onEnded?.(String(data.params?.reason ?? ''));
+				}
 			} catch {
 				/* never let a handler throw break the host bridge listener */
 			}
@@ -304,6 +375,10 @@ function createDefaultApp(): McpApp {
 			pendingCalls.delete(data.id);
 			if (data.error) reject(new Error(data.error.message));
 			else resolve(data.result);
+		} else if (data.result?.granted === true && typeof data.result.streamId === 'string') {
+			// A mic grant for a start that already timed out here (the user sat on the browser
+			// prompt): nobody consumes it, so hand it straight back instead of leaving the mic on.
+			sendNotification('host/microphone.stop', { streamId: data.result.streamId });
 		}
 	};
 
@@ -395,6 +470,32 @@ function createDefaultApp(): McpApp {
 		},
 		teardownProviderEmbed(embedId: string) {
 			sendNotification('host/embed.teardown', { embedId });
+		},
+		async startMicrophone({ onData, onEnded, ...params }: MicrophoneOptions): Promise<MicrophoneStartResult> {
+			if (hostLacks('microphone')) return { granted: false, reason: 'unsupported_host' };
+			// Long timeout: the host waits on the browser permission prompt.
+			const result = await sendRequest('host/microphone.start', params, 120_000);
+			if (!result?.granted) return { granted: false, reason: result?.reason ?? 'unavailable' };
+			// The host starts streaming right after this reply; registering here (before the next
+			// message task) means no frame is dropped. A replaced capture is ended by the host with
+			// `ui/microphone.ended { reason: 'replaced' }`, which reaches its own onEnded.
+			microphoneHandlers.set(result.streamId, { onData, onEnded });
+			return {
+				...result,
+				stop: () => {
+					if (microphoneHandlers.delete(result.streamId)) sendNotification('host/microphone.stop', { streamId: result.streamId });
+				},
+			};
+		},
+		async requestWakeLock(): Promise<WakeLockResult> {
+			if (hostLacks('wakeLock')) return { granted: false, reason: 'unsupported_host' };
+			const result: WakeLockResult = await sendRequest('host/wakeLock.request', {}, 10_000);
+			wakeLockWanted = result.granted;
+			return result;
+		},
+		releaseWakeLock() {
+			wakeLockWanted = false;
+			sendNotification('host/wakeLock.release', {});
 		},
 		set onhostinitialize(handler: (() => void) | undefined) {
 			initializeHandler = handler;

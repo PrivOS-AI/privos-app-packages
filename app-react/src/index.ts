@@ -13,6 +13,10 @@ export type {
 	ProviderEmbedRect,
 	ProviderEmbedDecision,
 	ProviderEmbedDenialReason,
+	MicrophoneOptions,
+	MicrophoneStartResult,
+	MicrophoneDenialReason,
+	WakeLockResult,
 } from './PrivosAppProvider';
 export { usePrivosApp } from './use-privos-app';
 export { usePrivosContext } from './use-privos-context';

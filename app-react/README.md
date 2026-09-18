@@ -94,6 +94,30 @@ Rules worth knowing:
   twice means the second instance wins and unmounting it withdraws ownership for both.
 - The AI backend is unchanged — your chat window still reaches the hub AI through the bridge.
 
+## Microphone and wake lock
+
+The app iframe runs in an opaque origin, where browsers refuse `getUserMedia` and the Wake Lock
+API. The host does both for you, for what the tool declares in `_meta.ui.permissions`:
+
+```tsx
+const app = usePrivosApp();
+
+// Call from a click/keypress handler.
+const mic = await app.startMicrophone?.({ sampleRate: 16000, onData: (pcm: Int16Array) => ws.send(pcm) });
+if (!mic?.granted) {
+  // 'not_declared' | 'user_activation_required' | 'denied' | 'unavailable' | 'unsupported_host'
+  // unsupported_host (or no startMicrophone): older hub, fall back to getUserMedia
+} else {
+  mic.stop(); // when done
+}
+
+await app.requestWakeLock?.(); // host re-acquires on visibility until released
+app.releaseWakeLock?.();
+```
+
+Frames are mono signed 16-bit PCM at `mic.sampleRate`. The first time, the hub asks the user
+"<App> wants to use your microphone — Allow / Block" (Block answers `denied`). Camera is not brokered.
+
 ## User-delegated identity
 
 The iframe receives display context, not a bearer or user token. Calls made through
