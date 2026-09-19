@@ -76,4 +76,41 @@ describe('verifyUserToken', () => {
 		expect(result.ok).toBe(false);
 		if (!result.ok) expect(result.reason).toBe('invalid');
 	});
+
+	it('lifts the Hub-signed room_roles / workspace_roles claims onto the actor', async () => {
+		const { jwks, sign, aud } = await mintTestKeys();
+		const token = await sign({
+			sub: 'user-1',
+			rid: 'room-9',
+			room_roles: ['owner', 'moderator'],
+			workspace_roles: ['admin', 'user'],
+		});
+		const result = await verifyUserToken(token, {
+			jwksUrl: 'http://unused.invalid/jwks',
+			audience: aud,
+			localJwks: jwks,
+		});
+		expect(result.ok).toBe(true);
+		if (result.ok) {
+			expect(result.actor.roomRoles).toEqual(['owner', 'moderator']);
+			expect(result.actor.workspaceRoles).toEqual(['admin', 'user']);
+			// Empty room_roles ("plain member") is preserved, never dropped.
+			expect(result.actor.claims.room_roles).toEqual(['owner', 'moderator']);
+		}
+	});
+
+	it('omits the typed role fields when the token carries no role claims', async () => {
+		const { jwks, sign, aud } = await mintTestKeys();
+		const token = await sign({ sub: 'user-1', rid: 'room-9' });
+		const result = await verifyUserToken(token, {
+			jwksUrl: 'http://unused.invalid/jwks',
+			audience: aud,
+			localJwks: jwks,
+		});
+		expect(result.ok).toBe(true);
+		if (result.ok) {
+			expect(result.actor.roomRoles).toBeUndefined();
+			expect(result.actor.workspaceRoles).toBeUndefined();
+		}
+	});
 });

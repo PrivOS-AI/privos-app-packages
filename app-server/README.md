@@ -303,6 +303,32 @@ connectRelay({
 });
 ```
 
+#### Caller role claims (`actor.roomRoles` / `actor.workspaceRoles`)
+
+When the app is granted the `rooms:roles:read` scope, the Hub adds the calling
+user's OWN roles to the signed user token, and `verifyUserToken` lifts them onto
+the actor:
+
+- `actor.roomRoles` — the caller's roles in `actor.roomId` (`owner`,
+  `moderator`, `leader`, …). `[]` means a plain member; the field is absent when
+  the token carries no `rid`.
+- `actor.workspaceRoles` — the caller's workspace roles (contains `admin` for a
+  workspace admin).
+
+Both are absent unless the scope was granted, so gate on presence, not member:
+
+```ts
+const actor = assertActorAvailable(context, 'enforce');
+if (!actor.roomRoles?.includes('owner') && !actor.workspaceRoles?.includes('admin')) {
+  throw new Error('Room owner or workspace admin required');
+}
+```
+
+The claims describe only the caller, are signed by the Hub, and live for the
+token's short TTL (~5 min) — re-fetch a fresh token (e.g. via `mcpapp.context.get`)
+so a role change is reflected. They are never derived from anything the client
+sends, so an app can trust them but can never widen them.
+
 For a non-standalone Relay/Direct setup with a dynamic (resolver) trust —
 where this app's own `mcpAppId` is still fixed, just not known synchronously
 from a static trust record — wire the same verification manually:

@@ -19,6 +19,20 @@ export interface VerifiedActor {
 	username?: string;
 	/** JWT `rid` when present. */
 	roomId?: string;
+	/**
+	 * The caller's OWN role names in `roomId` (`owner` | `moderator` | `leader` | …), lifted
+	 * from the Hub-signed `room_roles` claim. Present only when the app was granted the
+	 * `rooms:roles:read` scope AND the token carries a `rid`; `[]` means a plain member.
+	 * Gate room-owner/moderator actions on this, e.g. `actor.roomRoles?.includes('owner')`.
+	 */
+	roomRoles?: string[];
+	/**
+	 * The caller's OWN workspace role names, lifted from the Hub-signed `workspace_roles`
+	 * claim (contains `admin` for a workspace admin). Present only when the app was granted
+	 * the `rooms:roles:read` scope. Gate workspace-admin actions on this, e.g.
+	 * `actor.workspaceRoles?.includes('admin')`.
+	 */
+	workspaceRoles?: string[];
 	/** Raw claims subset safe for app policy (no token string). */
 	claims: Readonly<Record<string, unknown>>;
 	/** How this actor was established — see {@link VerifiedActorProvenance}. */

@@ -90,6 +90,15 @@ async function getVerifier(options: AuthOptions): Promise<JWTVerifyGetKey> {
 	return getJwks(options);
 }
 
+/**
+ * Lift a signed role claim to a typed `string[]`, or `undefined` when the claim is absent or
+ * not an array of strings. An empty array is preserved — for `room_roles` it means "plain member".
+ */
+function asStringArray(value: unknown): string[] | undefined {
+	if (!Array.isArray(value)) return undefined;
+	return value.every((entry) => typeof entry === 'string') ? (value as string[]) : undefined;
+}
+
 function actorFromPayload(payload: JWTPayload): VerifiedActor {
 	if (!payload.sub) {
 		throw new Error('JWT missing sub claim');
@@ -97,10 +106,14 @@ function actorFromPayload(payload: JWTPayload): VerifiedActor {
 	const username =
 		typeof payload.preferred_username === 'string' ? payload.preferred_username : undefined;
 	const roomId = typeof payload.rid === 'string' ? payload.rid : undefined;
+	const roomRoles = asStringArray(payload.room_roles);
+	const workspaceRoles = asStringArray(payload.workspace_roles);
 	return Object.freeze({
 		userId: payload.sub,
 		...(username !== undefined ? { username } : {}),
 		...(roomId !== undefined ? { roomId } : {}),
+		...(roomRoles !== undefined ? { roomRoles } : {}),
+		...(workspaceRoles !== undefined ? { workspaceRoles } : {}),
 		claims: Object.freeze({ ...payload }) as Readonly<Record<string, unknown>>,
 		provenance: 'user-token',
 	});
