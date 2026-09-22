@@ -18,7 +18,7 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { AgentHarnessIsolationLevel } from '../hub-relay-client.js';
 
-export type AdapterId = 'claude' | 'codex' | 'cursor' | 'goose' | 'custom';
+export type AdapterId = 'claude' | 'codex' | 'cursor' | 'goose' | 'agy' | 'custom';
 export type SystemPromptTransport = 'meta' | 'top-level' | 'prefix';
 
 export interface NativeSandboxConfigParams {
@@ -161,6 +161,25 @@ export const ADAPTER_TABLE: Record<AdapterId, AdapterSpec> = {
 		// `session/update` metadata that this bridge doesn't capture -- not
 		// built (plan.md); the cancel+merge fallback covers Goose users.
 		steering: 'none',
+		credentialFiles: [],
+		realStateDir: () => homedir(),
+		writeNativeSandboxConfig: NOOP_NATIVE_SANDBOX,
+	},
+	agy: {
+		id: 'agy',
+		testedVersion: 'latest',
+		// Google Antigravity `agy` has no native ACP mode; a community adapter wraps
+		// its `--output-format=stream-json` headless mode (e.g. `agy-agent-acp`).
+		// Override the concrete binary with `--command` until one is pinned.
+		command: 'agy-agent-acp',
+		args: [],
+		systemPromptTransport: 'prefix',
+		authHint: 'requires an Antigravity login in the system keyring (`agy auth`)',
+		installHint: 'install a `agy` ACP adapter (e.g. npm i -g agy-agent-acp) and log in with `agy auth`',
+		expectedLoadSession: false,
+		steering: 'none',
+		// agy keeps its auth in the OS keyring, so there is no credential file to
+		// copy into the isolated home — shared/real state, like cursor.
 		credentialFiles: [],
 		realStateDir: () => homedir(),
 		writeNativeSandboxConfig: NOOP_NATIVE_SANDBOX,

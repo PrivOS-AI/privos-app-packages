@@ -18,6 +18,7 @@ import {
 	type ContentBlock,
 	type InitializeResponse,
 	type NewSessionRequest,
+	type PromptCapabilities,
 	type PermissionOption,
 	type SessionUpdate,
 	type Stream,
@@ -27,7 +28,11 @@ import {
 import type { AdapterSpec } from './adapter-table.js';
 import { decidePermission, type PermissionPolicy } from './permission-policy.js';
 import { buildStandingPreamble, buildTurnFrame } from '../prompt-frame.js';
+import { readFile } from 'node:fs/promises';
+import { pathToFileURL } from 'node:url';
+
 import { BRIDGE_VERSION } from '../version.js';
+import type { WrittenAttachment as TurnAttachment } from '../turn-attachments.js';
 import type { AgentHarnessIsolationLevel } from '../hub-relay-client.js';
 
 const CANCEL_GRACE_MS = 30_000;
@@ -40,6 +45,8 @@ export interface RunTurnInput {
 	senderName: string;
 	prompt: string;
 	promptFull: string;
+	/** Files written under the room workdir, to attach as prompt content blocks. */
+	attachments?: TurnAttachment[];
 	resume: boolean;
 	savedSessionId: string | undefined;
 	policy: PermissionPolicy;
@@ -91,6 +98,42 @@ function truncate(text: string, max: number): string {
 
 function textOf(block: ContentBlock): string {
 	return block.type === 'text' ? block.text : '';
+}
+
+/**
+ * Turn written room attachments into ACP prompt content blocks, adapting to the
+ * agent's advertised prompt capabilities:
+ *   - images, when the agent supports `image` content → inlined as an image block
+ *     (best fidelity); otherwise referenced by path like any other file;
+ *   - every attachment → a `resource_link` (baseline ACP content) plus one text
+ *     line naming the absolute path, so an adapter that ignores resource_link
+ *     still learns the path and can open the file with its own tool.
+ */
+async function buildAttachmentBlocks(
+	attachments: TurnAttachment[],
+	caps: PromptCapabilities | null | undefined,
+): Promise<ContentBlock[]> {
+	const blocks: ContentBlock[] = [];
+	const paths: string[] = [];
+	for (const att of attachments) {
+		const uri = pathToFileURL(att.path).toString();
+		if (att.mimeType.startsWith('image/') && caps?.image) {
+			try {
+				const data = (await readFile(att.path)).toString('base64');
+				blocks.push({ type: 'image', data, mimeType: att.mimeType });
+			} catch {
+				blocks.push({ type: 'resource_link', name: att.name, uri, mimeType: att.mimeType });
+			}
+		} else {
+			blocks.push({ type: 'resource_link', name: att.name, uri, mimeType: att.mimeType });
+		}
+		paths.push(att.path);
+	}
+	blocks.push({
+		type: 'text',
+		text: `The user attached the following file(s); open them with your file-reading tool:\n${paths.map((p) => `- ${p}`).join('\n')}`,
+	});
+	return blocks;
 }
 
 export class AcpSession {
@@ -330,6 +373,10 @@ export class AcpSession {
 					{ type: 'text', text: framed },
 				]
 			: [{ type: 'text', text: framed }];
+
+		if (input.attachments?.length) {
+			blocks.push(...(await buildAttachmentBlocks(input.attachments, this.agentCapabilities?.promptCapabilities)));
+		}
 
 		let idleTimer: NodeJS.Timeout;
 		let deadlineTimer: NodeJS.Timeout | undefined;

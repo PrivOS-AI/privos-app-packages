@@ -41,6 +41,17 @@ export interface AgentHarnessTurnStartParams {
 	sender: AgentHarnessTurnSender;
 	resume: boolean;
 	deadlineMs: number;
+	/** Room-message files carried inline (base64). The bridge writes them into
+	 * the room workdir and turns them into ACP prompt content blocks. */
+	attachments?: AgentHarnessTurnAttachment[];
+}
+
+/** A single inline attachment on `turn.start`. */
+export interface AgentHarnessTurnAttachment {
+	name: string;
+	mimeType: string;
+	/** base64-encoded file bytes. */
+	data: string;
 }
 
 export const AGENT_HARNESS_BUSY_ERROR_CODE = 'harness_busy' as const;

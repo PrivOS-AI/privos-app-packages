@@ -29,6 +29,7 @@ import {
 } from './hub-relay-client.js';
 import { getSession, resetAllSessions, setSession } from './session-store.js';
 import { extractSystemIdentity } from './prompt-frame.js';
+import { writeTurnAttachments } from './turn-attachments.js';
 import { writeIdentityFile } from './skills-installer.js';
 
 const MAX_PENDING_PER_SESSION_KEY = 5;
@@ -183,6 +184,14 @@ export class TurnRunner {
 	private async executeTurn(params: AgentHarnessTurnStartParams): Promise<void> {
 		const saved = getSession(this.opts.agentId, params.sessionKey);
 		const senderName = params.sender.name || params.sender.username || params.sender._id;
+		const turnCwd = this.opts.roomDir ? this.opts.roomDir(params.roomId) : this.opts.cwd;
+
+		// Room-message files: written under the room workdir (inside the isolation
+		// boundary) so the adapter can open them by path / resource_link. Failures
+		// are non-fatal — the turn still runs with whatever was written.
+		const attachments = params.attachments?.length && turnCwd
+			? await writeTurnAttachments(turnCwd, params.turnId, params.attachments)
+			: [];
 
 		if (this.opts.workspaceDir) {
 			const identity = extractSystemIdentity(params.promptFull) ?? extractSystemIdentity(params.prompt);
@@ -199,6 +208,7 @@ export class TurnRunner {
 			senderName,
 			prompt: params.prompt,
 			promptFull: params.promptFull,
+			attachments,
 			resume: params.resume,
 			savedSessionId: saved?.acpSessionId,
 			policy: this.opts.policy,
@@ -225,8 +235,7 @@ export class TurnRunner {
 			return;
 		}
 
-		const cwd = this.opts.roomDir ? this.opts.roomDir(params.roomId) : this.opts.cwd;
-		setSession(this.opts.agentId, params.sessionKey, result.acpSessionId, { adapter: this.opts.adapterId, cwd });
+		setSession(this.opts.agentId, params.sessionKey, result.acpSessionId, { adapter: this.opts.adapterId, cwd: turnCwd });
 		this.relay?.notify('turn.done', {
 			turnId: params.turnId,
 			status: result.status,
