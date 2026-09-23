@@ -8,6 +8,7 @@ export type {
 	AppStorage,
 	RestRequestParams,
 	RestResponse,
+	RestBinaryResult,
 	UploadFileParams,
 	PrivosHostContext,
 	ProviderEmbedRect,

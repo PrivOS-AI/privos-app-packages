@@ -15,12 +15,27 @@ export interface RestRequestParams {
 	/** Override the host-bridge response timeout (ms). Default 10000. Raise for slow
 	 *  downstreams (e.g. a cold Sandbox VM spawn behind agents.sandbox.generate-async). */
 	timeoutMs?: number;
+	/** `'blob'` — the hub wraps every successful downstream (bytes, text or JSON file) in
+	 *  the base64 envelope and the host resolves `body` as a `Blob` (plus `fileName`).
+	 *  Default `'json'`: only non-JSON, non-text bodies arrive as the envelope in
+	 *  `body.result` (see `RestBinaryResult`); text stays a string. Needs hub tenant.240+. */
+	responseType?: 'json' | 'blob';
+}
+
+/** Shape of `body.result` when a downstream endpoint returned non-JSON bytes. */
+export interface RestBinaryResult {
+	dataBase64: string;
+	mimeType: string;
+	fileName?: string;
+	size: number;
 }
 
 /** Result of a REST passthrough: downstream HTTP status + parsed JSON body. */
 export interface RestResponse<T = any> {
 	statusCode: number;
 	body: T;
+	/** Set only for binary downstreams (from `Content-Disposition`). */
+	fileName?: string;
 }
 
 /** Placeholder geometry, in CSS pixels relative to the app document's own viewport. */
