@@ -39,12 +39,17 @@ const isAccessMode = (value: string | undefined): value is AppAccessMode =>
  * own infrastructure where nothing is injected at all.
  */
 export function getPlatformContext(env: NodeJS.ProcessEnv = process.env): PlatformContext {
-	const publicUrl = env.PRIVOS_PUBLIC_URL;
+	// `PRIVOS_APP_PUBLIC_URL` is the app's own origin; `PRIVOS_PUBLIC_URL` is the
+	// deprecated alias the platform still injects during the rename transition.
+	// Prefer the new name, but a malformed value is treated as absent — an empty
+	// or non-https new var must not shadow a valid alias, which is exactly the
+	// mixed-injection window this fallback exists for.
+	const publicUrl = [env.PRIVOS_APP_PUBLIC_URL, env.PRIVOS_PUBLIC_URL].find(
+		(value): value is string => typeof value === 'string' && value.startsWith('https://'),
+	);
 	const accessMode = env.PRIVOS_ACCESS_MODE;
 	return {
-		// A malformed value is treated as absent rather than passed on: an app
-		// that builds a callback URL from it would otherwise emit a broken one.
-		...(typeof publicUrl === 'string' && publicUrl.startsWith('https://') ? { publicUrl } : {}),
+		...(publicUrl ? { publicUrl } : {}),
 		...(isAccessMode(accessMode) ? { accessMode } : {}),
 	};
 }

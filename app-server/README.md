@@ -589,6 +589,36 @@ compatibility alias for `privos-app lint` — same output, same exit code.
 `privos-app lint --publish` additionally runs the `bundle-ui` check described below — see
 [CLI: `privos-app bundle-ui`](#cli-privos-app-bundle-ui).
 
+## Public hostnames (v3)
+
+A managed (schemaVersion 3) app has **no public host** unless a tenant admin
+registers one in Hub app settings. Declare in `privos-app.json` how public the
+app may be:
+
+- `publicAccess: "none"` — never routable from outside; no Domains section.
+- `publicAccess: "optional"` (the default when the field is absent) — an admin
+  *may* register a host.
+- `publicAccess: "required"` — a host is pre-registered before the first deploy,
+  so `PRIVOS_APP_PUBLIC_URL` is present from the first boot. Shown on the install
+  consent screen.
+
+Declare `exposedPorts: [{ name, port }]` (at most 8) for extra HTTP ports a
+registered host may route path prefixes to, beside the main `port`. Each `name`
+is a DNS label; `main` is reserved for the main port; ports are unique and differ
+from the main port. `exposedPorts` with `publicAccess: "none"` is rejected.
+
+Read the origin from the SDK, never assume the env var exists:
+
+```ts
+import { getPlatformContext, publicUrlFor } from 'privos-app-server';
+
+const { publicUrl } = getPlatformContext(); // undefined when no host is registered
+const webhook = publicUrlFor('/webhooks/stripe'); // undefined-safe
+```
+
+`getPlatformContext()` reads `PRIVOS_APP_PUBLIC_URL` and falls back to the
+deprecated `PRIVOS_PUBLIC_URL` alias — do not read `process.env` directly.
+
 ## CLI: `privos-app publish`
 
 Run from inside the app folder (where `privos-app.json` and `package.json` live):

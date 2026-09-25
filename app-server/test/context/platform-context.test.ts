@@ -12,6 +12,39 @@ describe('platform context', () => {
 		).toEqual({ publicUrl: 'https://my-app.apps.privos.link', accessMode: 'managed-runtime' });
 	});
 
+	it('prefers PRIVOS_APP_PUBLIC_URL over the deprecated PRIVOS_PUBLIC_URL alias', () => {
+		expect(
+			getPlatformContext({
+				PRIVOS_APP_PUBLIC_URL: 'https://new.apps.privos.link',
+				PRIVOS_PUBLIC_URL: 'https://old.apps.privos.link',
+			} as NodeJS.ProcessEnv),
+		).toEqual({ publicUrl: 'https://new.apps.privos.link' });
+	});
+
+	it('falls back to the deprecated alias when only it is present', () => {
+		expect(
+			getPlatformContext({
+				PRIVOS_PUBLIC_URL: 'https://old.apps.privos.link',
+			} as NodeJS.ProcessEnv),
+		).toEqual({ publicUrl: 'https://old.apps.privos.link' });
+	});
+
+	it('does not let an empty or malformed new var shadow a valid alias', () => {
+		// Templated-but-unset injection during the rename transition.
+		expect(
+			getPlatformContext({
+				PRIVOS_APP_PUBLIC_URL: '',
+				PRIVOS_PUBLIC_URL: 'https://old.apps.privos.link',
+			} as NodeJS.ProcessEnv),
+		).toEqual({ publicUrl: 'https://old.apps.privos.link' });
+		expect(
+			getPlatformContext({
+				PRIVOS_APP_PUBLIC_URL: 'http://insecure.example',
+				PRIVOS_PUBLIC_URL: 'https://old.apps.privos.link',
+			} as NodeJS.ProcessEnv),
+		).toEqual({ publicUrl: 'https://old.apps.privos.link' });
+	});
+
 	it('is undefined-safe on a platform that injects nothing', () => {
 		// An app built against this SDK still has to run on an older platform,
 		// and on the publisher's own infrastructure.

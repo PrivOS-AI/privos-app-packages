@@ -80,4 +80,23 @@ describe('manifest v3 tooling', () => {
 		expect(lintManifest(lifecycleManifest).publisherPermissionDeclarationHash)
 			.not.toBe(lintManifest(manifest).publisherPermissionDeclarationHash);
 	});
+
+	it('accepts publicAccess and exposedPorts, and enforces their rules', () => {
+		expect(lintManifest({ ...lifecycleManifest, publicAccess: 'required', exposedPorts: [{ name: 'api', port: 8080 }] }))
+			.toMatchObject({ valid: true });
+		expect(lintManifest({ ...lifecycleManifest, publicAccess: 'bogus' }).errors)
+			.toContain('publicAccess must be one of none, optional, required');
+		expect(lintManifest({ ...lifecycleManifest, publicAccess: 'none', exposedPorts: [{ name: 'api', port: 8080 }] }).errors)
+			.toContain('exposedPorts cannot be declared with publicAccess "none"');
+		expect(lintManifest({ ...lifecycleManifest, exposedPorts: [{ name: 'api', port: 8080 }, { name: 'api', port: 9090 }] }).errors)
+			.toContain('exposedPorts names must be unique');
+		expect(lintManifest({ ...lifecycleManifest, exposedPorts: [{ name: 'api', port: 8080 }, { name: 'metrics', port: 8080 }] }).errors)
+			.toContain('exposedPorts ports must be unique');
+		expect(lintManifest({ ...lifecycleManifest, port: 8080, exposedPorts: [{ name: 'api', port: 8080 }] }).errors)
+			.toContain('An exposedPorts port must differ from the main port');
+		expect(lintManifest({ ...lifecycleManifest, exposedPorts: [{ name: 'main', port: 8080 }] }).errors)
+			.toContain('exposedPorts[0].name "main" is reserved for the main port');
+		expect(lintManifest({ ...manifest, exposedPorts: [{ name: 'api', port: 8080 }] }).errors)
+			.toContain('exposedPorts requires schemaVersion 3');
+	});
 });
