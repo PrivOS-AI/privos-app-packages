@@ -18,7 +18,7 @@ export interface RestRequestParams {
 	/** `'blob'` — the hub wraps every successful downstream (bytes, text or JSON file) in
 	 *  the base64 envelope and the host resolves `body` as a `Blob` (plus `fileName`).
 	 *  Default `'json'`: only non-JSON, non-text bodies arrive as the envelope in
-	 *  `body.result` (see `RestBinaryResult`); text stays a string. Needs hub tenant.240+. */
+	 *  `body.result` (see `RestBinaryResult`); text stays a string. Needs a Hub that supports binary REST downloads. */
 	responseType?: 'json' | 'blob';
 }
 
