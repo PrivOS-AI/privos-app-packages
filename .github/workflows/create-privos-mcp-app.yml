@@ -1,0 +1,81 @@
+name: create-privos-mcp-app
+
+# Tests the scaffolder, then scaffolds each template from the packed tarball and
+# runs the commands a developer runs first: install, test, typecheck, the
+# production UI bundle and the publish lint. Releasing is done by publish.yml.
+
+on:
+  push:
+    paths:
+      - 'create-privos-mcp-app/**'
+      - '.github/workflows/create-privos-mcp-app.yml'
+  pull_request:
+    paths:
+      - 'create-privos-mcp-app/**'
+      - '.github/workflows/create-privos-mcp-app.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  scaffolder:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: create-privos-mcp-app
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: create-privos-mcp-app/package-lock.json
+      - run: npm ci
+      - name: Scaffolder tests
+        run: npm test
+
+  template:
+    needs: scaffolder
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        template: [default, instant]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: create-privos-mcp-app/package-lock.json
+      - name: Pack the scaffolder
+        working-directory: create-privos-mcp-app
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run build
+          npm pack --silent --pack-destination "$RUNNER_TEMP"
+      - name: Scaffold the ${{ matrix.template }} template from the tarball
+        working-directory: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          npm exec --yes --package="$(ls "$RUNNER_TEMP"/create-privos-mcp-app-*.tgz)" -- \
+            create-privos-mcp-app sample-app --template "${{ matrix.template }}" --id ai.example.sample-app
+      - name: Install
+        working-directory: ${{ runner.temp }}/sample-app
+        run: npm install --include=dev
+      - name: Test
+        working-directory: ${{ runner.temp }}/sample-app
+        run: npm test
+      - name: Typecheck
+        working-directory: ${{ runner.temp }}/sample-app
+        run: npm run typecheck
+      - name: Production bundle
+        working-directory: ${{ runner.temp }}/sample-app
+        run: |
+          set -euo pipefail
+          npm run build
+          npm run bundle:ui
+      - name: Publish lint
+        working-directory: ${{ runner.temp }}/sample-app
+        run: npm run manifest:lint:publish
