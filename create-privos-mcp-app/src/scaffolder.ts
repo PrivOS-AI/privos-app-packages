@@ -249,7 +249,7 @@ export function describeScaffold(result: ScaffoldResult): { warnings: string[]; 
 	const steps = [`cd ${appName}`, 'npm install --include=dev', commitStep];
 	steps.push(
 		result.template === 'instant'
-			? 'npm run dev   # local preview of the UI in a browser'
+			? 'npm run dev   # live UI preview in a workspace over Relay; run "npm run pair" once first'
 			: 'npm run dev   # watch mode with a live UI; run "npm run pair" once to open the app in a workspace',
 	);
 	return { warnings, steps };

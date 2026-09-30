@@ -36,6 +36,7 @@ describe('scaffoldApp — --template instant', () => {
 		expect(fs.existsSync(path.join(targetDir, 'vitest.config.ts'))).toBe(true);
 		expect(fs.existsSync(path.join(targetDir, 'tsconfig.json'))).toBe(true);
 		expect(fs.existsSync(path.join(targetDir, 'tests', 'manifest.spec.ts'))).toBe(true);
+		expect(fs.existsSync(path.join(targetDir, 'tests', 'relay-manifest.spec.ts'))).toBe(true);
 
 		const pkg = JSON.parse(fs.readFileSync(path.join(targetDir, 'package.json'), 'utf-8')) as {
 			dependencies?: Record<string, string>;
@@ -54,6 +55,11 @@ describe('scaffoldApp — --template instant', () => {
 		expect(pkg.scripts.test).toBe('vitest run');
 		expect(pkg.scripts.typecheck).toBeDefined();
 		expect(pkg.scripts['manifest:lint:publish']).toBe('privos-app lint privos-app.json --publish');
+		// The preview runs over Relay with tsx, from the development dependencies only.
+		expect(pkg.scripts.dev).toContain('scripts/dev-relay.ts');
+		expect(pkg.scripts.pair).toContain('scripts/pair.ts');
+		expect(pkg.devDependencies?.tsx).toBeDefined();
+		expect(pkg.devDependencies?.express).toBeDefined();
 	});
 
 	it('produces a privos-app.json declaring executionMode INSTANT with ui.entryPoints and no forbidden fields', async () => {
@@ -99,6 +105,34 @@ describe('scaffoldApp — --template instant', () => {
 		const { lintManifest, lintInstantManifest } = await import('@privos_ai/app-server');
 		expect(lintManifest(manifest)).toMatchObject({ valid: true });
 		expect(lintInstantManifest(manifest).errors).toEqual([]);
+	});
+
+	it('previews over Relay with a pair script that reads the URL from stdin and a manifest built in memory', async () => {
+		await scaffoldApp('demo-app', { template: 'instant', id: 'ai.acme.demo-app' });
+		const targetDir = path.join(workDir, 'demo-app');
+
+		const pairSource = fs.readFileSync(path.join(targetDir, 'scripts', 'pair.ts'), 'utf-8');
+		expect(pairSource).toContain('pairAndAwaitApproval');
+		expect(pairSource).toContain('buildRelayManifest');
+		expect(pairSource).toContain('process.stdin');
+		expect(pairSource).not.toContain('process.argv');
+		expect(pairSource).not.toContain('.env');
+
+		const devSource = fs.readFileSync(path.join(targetDir, 'scripts', 'dev-relay.ts'), 'utf-8');
+		expect(devSource).toContain('serveApp(');
+		expect(devSource).toContain('resolveManifest: relayManifest');
+		expect(devSource).toContain('startDevUi');
+
+		// The synthesized tools live in the scripts only: privos-app.json stays tool-free.
+		const manifest = JSON.parse(fs.readFileSync(path.join(targetDir, 'privos-app.json'), 'utf-8')) as Record<string, unknown>;
+		expect(manifest.tools).toBeUndefined();
+		expect(fs.readFileSync(path.join(targetDir, 'scripts', 'relay-manifest.ts'), 'utf-8')).toContain("const APP_NAME = 'demo-app'");
+
+		// The bundle builds from src/ui only, so nothing of the preview can reach it.
+		const viteConfig = fs.readFileSync(path.join(targetDir, 'vite.config.ts'), 'utf-8');
+		expect(viteConfig).toContain("root: 'src/ui'");
+		const tsconfig = JSON.parse(fs.readFileSync(path.join(targetDir, 'tsconfig.json'), 'utf-8')) as { include: string[] };
+		expect(tsconfig.include).toEqual(expect.arrayContaining(['src', 'scripts', 'tests']));
 	});
 
 	it('still scaffolds the default template unchanged when --template is omitted', async () => {
