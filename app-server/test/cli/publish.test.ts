@@ -256,6 +256,50 @@ describe('runPublish — PUBLISH_GRANT_MISMATCH maps to exit 2', () => {
 	});
 });
 
+describe('runPublish — PUBLISHER_NOT_ENABLED maps to exit 2', () => {
+	it('exits 2 with the Portal message and the Standalone Relay alternative, and uploads nothing', async () => {
+		const repo = fixtureRepo('com.example.notenabled', '1.0.0');
+		const portal = new FakeMarketplacePortal({ defaultAutoApproveAfterPolls: 1, refusePublisher: true });
+
+		const exitCode = await runPublish(['--json', '--yes'], {
+			cwd: repo,
+			env: {},
+			isTTY: false,
+			fetchImpl: portal.fetch,
+			sleepImpl: noopSleep,
+		});
+
+		expect(exitCode).toBe(2);
+		const errorEvent = parseNdjson().find((event) => event.event === 'error');
+		expect(errorEvent?.code).toBe('PUBLISHER_NOT_ENABLED');
+		expect(String(errorEvent?.message)).toMatch(/not open to third-party publishers/);
+		expect(String(errorEvent?.message)).toMatch(/Standalone Relay/);
+		expect(portal.uploadSessionCount()).toBe(0);
+		expect(portal.versionCount()).toBe(0);
+	});
+});
+
+describe('runPublish — LISTING_CONTENT_INCOMPLETE maps to exit 2', () => {
+	it('exits 2 with the Portal list of what the listing still needs', async () => {
+		const repo = fixtureRepo('com.example.incomplete', '1.0.0');
+		const portal = new FakeMarketplacePortal({ defaultAutoApproveAfterPolls: 1, listingContentIncomplete: true });
+
+		const exitCode = await runPublish(['--json', '--yes'], {
+			cwd: repo,
+			env: {},
+			isTTY: false,
+			fetchImpl: portal.fetch,
+			sleepImpl: noopSleep,
+		});
+
+		expect(exitCode).toBe(2);
+		const errorEvent = parseNdjson().find((event) => event.event === 'error');
+		expect(errorEvent?.code).toBe('LISTING_CONTENT_INCOMPLETE');
+		expect(String(errorEvent?.message)).toMatch(/Complete the listing first/);
+		expect(portal.versionCount()).toBe(0);
+	});
+});
+
 describe('runPublish — secrets never appear in captured output', () => {
 	it('masks the publisher token and never prints the raw grant value across all scenarios above', async () => {
 		const repo = fixtureRepo('com.example.secrets', '1.0.0');

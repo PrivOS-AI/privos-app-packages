@@ -343,6 +343,16 @@ function mapGrantPortalError(error: unknown): Error {
 	if (error.code === 'VERSION_SEMVER_EXISTS') {
 		return new CliExitError('Version already exists — bump `version` in privos-app.json and package.json.', 2, error.code);
 	}
+	if (error.code === 'LISTING_CONTENT_INCOMPLETE') {
+		return new CliExitError(error.message, 2, error.code);
+	}
+	if (error.code === 'PUBLISHER_NOT_ENABLED') {
+		return new CliExitError(
+			`${error.message}\nThe app can still run in your own workspace as a Standalone Relay app.`,
+			2,
+			error.code,
+		);
+	}
 	return new CliExitError(error.message, 4, error.code);
 }
 

@@ -48,6 +48,21 @@ export function parseRetryAfterMs(header: string | null): number | undefined {
 	return Math.max(0, parsed - Date.now());
 }
 
+/**
+ * The Portal answers most policy rejections with `{ error, findings? }` and no
+ * `message`; fall back to those so a refusal reads as its reason, not a status.
+ */
+function readableErrorMessage(record: Record<string, unknown> | undefined, fallback: string): string {
+	if (typeof record?.message === 'string') return record.message;
+	if (typeof record?.error !== 'string') return fallback;
+	const findings = Array.isArray(record.findings) ? record.findings : [];
+	const details = findings
+		.map((finding) => (finding && typeof finding === 'object' ? (finding as Record<string, unknown>).message : undefined))
+		.filter((message): message is string => typeof message === 'string')
+		.slice(0, 5);
+	return details.length > 0 ? `${record.error}: ${details.join('; ')}` : record.error;
+}
+
 export class PortalClient {
 	private readonly origin: string;
 	private readonly basePath: string;
@@ -95,8 +110,7 @@ export class PortalClient {
 				attempt += 1;
 				continue;
 			}
-			const message = typeof record?.message === 'string' ? record.message : `${method} ${path} failed (${response.status})`;
-			throw new PortalError(message, response.status, code, retryAfterMs);
+			throw new PortalError(readableErrorMessage(record, `${method} ${path} failed (${response.status})`), response.status, code, retryAfterMs);
 		}
 	}
 }

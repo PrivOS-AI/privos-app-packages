@@ -533,7 +533,7 @@ install/upgrade time — the runtime is never read for UI bytes once an install 
 is produced with:
 
 ```bash
-npx privos-app bundle-ui --dist ./dist --out ./ui-bundle.tar
+npx -p @privos_ai/app-server privos-app bundle-ui --dist ./dist --out ./ui-bundle.tar
 ```
 
 `bundle-ui` renders the shell with the **exact same code `serveBuiltUi` uses at runtime**
@@ -558,8 +558,8 @@ the same pinned base image and receives only the built `dist/` output — never 
 filesystem, npm config, or PATH, so nothing the creator's own build did can influence which
 `@privos_ai/app-server` version `bundle-ui` resolves or how it runs. That second stage invokes
 `npx --yes -p @privos_ai/app-server@<pinned version> privos-app bundle-ui` — `-p` is required: a
-plain `npx --yes @privos_ai/app-server <bin>` cannot pick a bin among this package's two (`privos-app`,
-`privos-app-lint`) and fails closed. The build node re-validates the output shape (reading the tar's
+plain `npx --yes @privos_ai/app-server <bin>` cannot pick a bin among this package's two bins
+and fails closed. The build node re-validates the output shape (reading the tar's
 member headers directly, never extracting it) before handing the artifact to the Portal — nothing
 from `dist/` reaches the Hub except through this bundle.
 
@@ -575,9 +575,9 @@ script), since a bundled shell is served statically and identically to every use
 ## Manifest v2 preflight
 
 ```bash
-npx privos-app-lint ./privos-app.json
+npx -p @privos_ai/app-server privos-app-lint ./privos-app.json
 # equivalent to:
-npx privos-app lint ./privos-app.json
+npx -p @privos_ai/app-server privos-app lint ./privos-app.json
 ```
 
 The command rejects mixed legacy/v2 permission declarations and prints deterministic
@@ -621,10 +621,13 @@ deprecated `PRIVOS_PUBLIC_URL` alias — do not read `process.env` directly.
 
 ## CLI: `privos-app publish`
 
-Run from inside the app folder (where `privos-app.json` and `package.json` live):
+Run from inside the app folder (where `privos-app.json` and `package.json` live),
+through the app's npm script, or with the scoped package named explicitly (the
+unscoped npm name `privos-app` is not this package):
 
 ```bash
-npx privos-app publish
+npm run publish:marketplace
+npx -p @privos_ai/app-server privos-app publish
 ```
 
 This packages the git worktree into a source archive (`git archive`, with the same
@@ -646,8 +649,14 @@ Useful flags: `--listing <slug>`, `--changelog <text>` / `--changelog-file <path
 `--yes` (skip the confirmation prompt), `--portal <origin>`, `--machine-label <text>`,
 `--open` (open the approval URL), `--json` (one NDJSON event per step), `--cwd <path>`.
 
+Marketplace publishing is open to enabled creators only; anyone else gets
+`PUBLISHER_NOT_ENABLED` before anything is uploaded (exit 2), and the app can still
+run in their own workspace as a Standalone Relay app. A first version of a listing
+whose content is incomplete is refused at version creation with
+`LISTING_CONTENT_INCOMPLETE` (exit 2).
+
 Exit codes: `0` submitted, `2` blocked by policy (lint/package/semver/preflight
-failed/unbound listing), `3` authorization denied/expired, `4` network/portal error,
+failed/unbound listing/creator not enabled/listing content incomplete), `3` authorization denied/expired, `4` network/portal error,
 `5` usage. The CLI's own manifest lint is structure-only — its
 `canonicalManifestHash` is **not** the Portal's canonical digest and is never sent;
 the Portal returns the authoritative `manifestDigest` after upload. Secrets are never

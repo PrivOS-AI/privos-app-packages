@@ -9,7 +9,7 @@ license: MIT
 argument-hint: "[app directory]"
 metadata:
   author: privos
-  version: "1.0.0"
+  version: "1.1.0"
 ---
 
 # PrivOS App Publish Skill
@@ -40,7 +40,7 @@ Not for: editing listing content, pricing, screenshots, or Stripe Connect
    `MANIFEST_IDENTITY_MISMATCH`) and must be a semver that has never been
    published for this listing before — re-publishing an existing semver fails
    with `VERSION_SEMVER_EXISTS`. Always bump both fields together.
-3. **Manifest passes structural lint.** Run `privos-app lint` (or let
+3. **Manifest passes structural lint.** Run `npm run manifest:lint` (or let
    `publish` run it — it lints as step 1) before attempting a full publish.
 4. **Catalog check.** Confirm this is genuinely a new version of an existing
    listing or a legitimately new app — do not re-run publish blindly after a
@@ -48,27 +48,40 @@ Not for: editing listing content, pricing, screenshots, or Stripe Connect
 
 ## Exact Commands
 
-Run from the app's root directory (where `privos-app.json` lives):
+Run from the app's root directory (where `privos-app.json` lives), through the
+app's own npm script so the CLI version pinned in the app's lockfile is used:
 
 ```bash
 # Preview only — packages the archive, prints its sha256, does not authorize or upload
-npx privos-app publish --dry-run
+npm run publish:marketplace -- --dry-run
 
 # Interactive (default): prints an approval URL, waits for browser approval
-npx privos-app publish
+npm run publish:marketplace
 
 # Non-interactive / CI: requires PRIVOS_PUBLISHER_TOKEN in the environment
-PRIVOS_PUBLISHER_TOKEN=pvp_xxx npx privos-app publish --yes
+npm run publish:marketplace -- --yes
 
 # Machine-readable event stream (one NDJSON object per line on stdout)
-npx privos-app publish --json
+npm run publish:marketplace -- --json
 ```
+
+If the app has no `publish:marketplace` script, name the scoped package
+explicitly: `npx -p @privos_ai/app-server privos-app publish <flags>`. Never
+hand a package runner the unscoped name `privos-app`: it is not this package.
 
 Useful flags: `--listing <slug>` (when the listing can't be resolved from the
 manifest name), `--changelog <text>` / `--changelog-file <path>`,
-`--allow-dirty`, `--portal <origin>` (default `https://portal.privos.io`),
-`--machine-label <text>` (shown on the approval page, never the hostname by
-default), `--cwd <path>`, `-h/--help`.
+`--allow-dirty`, `--machine-label <text>` (shown on the approval page, never
+the hostname by default), `--cwd <path>`, `-h/--help`. Do not pass `--portal`
+or set `PRIVOS_PORTAL_ORIGIN` unless the user names a Portal origin; the
+default (`https://portal.privos.io`) is the only public Portal.
+
+## Who Can Publish
+
+Marketplace publishing is open to enabled creators only. Anyone else gets
+`PUBLISHER_NOT_ENABLED` (exit 2) before anything is uploaded, and no version
+is created. Tell the user the app can still run in their own workspace as a
+Standalone Relay app; do not retry the publish.
 
 ## Reading `--json` Output
 
@@ -107,7 +120,7 @@ listing's first version was approved once interactively (see
 | Code | Meaning |
 |---|---|
 | 0 | Submitted (or reached a benign non-blocking status; see `references/errors.md`) |
-| 2 | Blocked by policy (manifest invalid, dirty tree, denied archive path, semver reused, preflight failed) |
+| 2 | Blocked by policy (manifest invalid, dirty tree, denied archive path, semver reused, listing content incomplete, creator not enabled, preflight failed) |
 | 3 | Authorization denied, expired, or already consumed |
 | 4 | Network or Portal error |
 | 5 | Usage error (bad flags, cancelled prompt, not a git repository) |
@@ -120,5 +133,6 @@ build) is tracked only in Creator Studio on `client.privos.io`. Tell the user
 to check there — do not invent a polling loop or guess at review state.
 
 See `references/errors.md` for the full error-code table and remediation,
-including `VERSION_SEMVER_EXISTS`, `PREFLIGHT_FAILED` vs
-`PREFLIGHT_BLOCKED_INFRA` vs incomplete listing content.
+including `VERSION_SEMVER_EXISTS`, `PUBLISHER_NOT_ENABLED`,
+`LISTING_CONTENT_INCOMPLETE`, and `PREFLIGHT_FAILED` vs
+`PREFLIGHT_BLOCKED_INFRA`.

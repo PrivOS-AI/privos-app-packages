@@ -79,6 +79,10 @@ export type FakeMarketplacePortalOptions = Readonly<{
 	deviceExpiresInSeconds?: number;
 	/** Test-only: makes `complete` see an archive digest that never matches what gets uploaded, forcing `PUBLISH_GRANT_MISMATCH`. */
 	forceArchiveSha256Mismatch?: boolean;
+	/** Refuses source uploads the way the Portal answers a creator who is not enabled for marketplace publishing. */
+	refusePublisher?: boolean;
+	/** Refuses a first version the way the Portal does while the listing lacks required content. */
+	listingContentIncomplete?: boolean;
 }>;
 
 function randomToken(prefix: string, bytes = 24): string {
@@ -97,6 +101,8 @@ export class FakeMarketplacePortal {
 	private readonly defaultAutoApproveAfterPolls?: number;
 	private readonly deviceExpiresInSeconds: number;
 	private readonly forceArchiveSha256Mismatch: boolean;
+	private readonly refusePublisher: boolean;
+	private readonly listingContentIncomplete: boolean;
 	private listingSequence = 0;
 	private uploadSequence = 0;
 	private versionSequence = 0;
@@ -109,6 +115,16 @@ export class FakeMarketplacePortal {
 		this.defaultAutoApproveAfterPolls = options.defaultAutoApproveAfterPolls;
 		this.deviceExpiresInSeconds = options.deviceExpiresInSeconds ?? 900;
 		this.forceArchiveSha256Mismatch = options.forceArchiveSha256Mismatch ?? false;
+		this.refusePublisher = options.refusePublisher ?? false;
+		this.listingContentIncomplete = options.listingContentIncomplete ?? false;
+	}
+
+	uploadSessionCount(): number {
+		return this.uploads.size;
+	}
+
+	versionCount(): number {
+		return this.versions.size;
 	}
 
 	seedListing(input: Readonly<{ slug: string; name: string; manifestName?: string }>): ListingRow {
@@ -298,6 +314,9 @@ export class FakeMarketplacePortal {
 	private createUploadSession(listingId: string, token: string, body: Record<string, unknown>): Record<string, unknown> {
 		const { row: authRow } = this.resolveGrant(token);
 		if (authRow.listingId !== listingId) throw new PortalHttpError(403, 'PUBLISH_GRANT_SCOPE', 'Grant does not cover this listing.');
+		if (this.refusePublisher) {
+			throw new PortalHttpError(403, 'PUBLISHER_NOT_ENABLED', 'Marketplace publishing is not open to third-party publishers yet. Nothing was uploaded.');
+		}
 		this.uploadSequence += 1;
 		const upload: UploadSessionRow = { id: `upload-${this.uploadSequence}`, listingId, authorizationId: authRow.id, parts: [], completed: false };
 		this.uploads.set(upload.id, upload);
@@ -329,6 +348,9 @@ export class FakeMarketplacePortal {
 
 	private createVersion(listingId: string, token: string, body: Record<string, unknown>): Record<string, unknown> {
 		const { row: authRow } = this.resolveGrant(token);
+		if (this.listingContentIncomplete) {
+			throw new PortalHttpError(409, 'LISTING_CONTENT_INCOMPLETE', 'Complete the listing first: Short description, Screenshots.');
+		}
 		const semver = String(body.semver);
 		const existing = [...this.versions.values()].find((version) => version.listingId === listingId && version.semver === semver);
 		if (existing) throw new PortalHttpError(409, 'VERSION_SEMVER_EXISTS', `Version ${semver} already exists for this listing.`);

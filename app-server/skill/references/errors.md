@@ -3,7 +3,7 @@
 Every failure the CLI surfaces carries a `code` (visible in `--json` `error`
 events and in the human-readable message) and maps to one of the exit codes
 in `SKILL.md`. This table is generated from the CLI's actual error sites
-(`src/cli/commands/publish.ts`, `src/cli/lib/*.ts`) — do not hand-edit
+(`src/cli/commands/publish.ts`, `src/cli/lib/*.ts`) and the Portal codes they map — do not hand-edit
 without checking the source stays in sync.
 
 ## Manifest / packaging (exit 2 unless noted)
@@ -28,6 +28,7 @@ without checking the source stays in sync.
 
 | Code | Cause | Remediation |
 |---|---|---|
+| `PUBLISHER_NOT_ENABLED` (exit 2) | Marketplace publishing is not open to this creator yet; the Portal refused the source upload before storing anything, and no version exists | Do not retry. Run the app in your own workspace as a Standalone Relay app |
 | `LISTING_NOT_BOUND` (exit 2) | A publisher token was used but this listing has never had an interactively-approved first version | Run `privos-app publish` without a token once (browser approval) to bind the listing, then use the token for subsequent versions |
 | `LISTING_UNRESOLVED` (exit 2) | The Portal could not resolve a listing from the manifest name | Pass `--listing <slug>` |
 | `AUTHORIZATION_DENIED` | The approver declined the request on the approval page | Confirm with the user this was intentional; re-run to request a new approval if not |
@@ -42,6 +43,7 @@ without checking the source stays in sync.
 | `PUBLISH_GRANT_EXPIRED` (exit 3) | The 60-minute grant expired mid-upload | Re-run `publish` to request a new approval; do not resume a stale grant |
 | `PUBLISH_GRANT_MISMATCH` | Uploaded archive sha256 or manifest name/version does not match what was approved | Re-run `publish` from a clean state — do not edit the archive after approval |
 | `VERSION_SEMVER_EXISTS` | This exact semver was already published for the listing | **Bump `version` in both `privos-app.json` and `package.json`**, then re-run |
+| `LISTING_CONTENT_INCOMPLETE` | A first version was refused at version creation because the listing still lacks required content; the message lists what is missing | Complete the listing in Creator Studio, then re-run `publish` (nothing was claimed) |
 
 ## Post-submit states (exit 0 — informational, not failures)
 
@@ -53,15 +55,11 @@ without checking the source stays in sync.
   prints the findings verbatim (exit 2). Fix the flagged issue, bump the
   version, and re-run `publish`.
 - **`PREFLIGHT_BLOCKED_INFRA`** — preflight cannot run because of
-  Portal-side build infrastructure capacity/availability, not anything wrong
-  with the submission (exit 0). Tell the user this is admin-side; no local
-  action fixes it — wait and check Creator Studio later.
-- **listing content incomplete** — a *different* gate than preflight: if the
-  Creator Studio listing itself is missing required metadata (categories,
-  screenshots, legal URLs), the submission can be accepted by the CLI but
-  stall in human review because the listing page is incomplete. This is not
-  a CLI error code — the CLI only packages and submits the version; finishing
-  the listing's content is done in Creator Studio, not via `privos-app`.
+  Portal-side build infrastructure (capacity or availability), not anything
+  wrong with the submission (exit 0). It is an infrastructure state only; a
+  creator who is not enabled is refused earlier with `PUBLISHER_NOT_ENABLED`.
+  Tell the user this is admin-side; no local action fixes it — wait and check
+  Creator Studio later.
 - **`PREFLIGHT_PENDING`** (still pending after 60 s) or any other state —
   printed as-is with "follow up in Creator Studio". The CLI has no `status`
   command; all further review progress (`SCAN` → `AI_REVIEW` → human
