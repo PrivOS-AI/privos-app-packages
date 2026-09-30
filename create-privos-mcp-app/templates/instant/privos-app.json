@@ -4,7 +4,7 @@
   "name": "{{APP_ID}}",
   "version": "1.0.0",
   "title": "{{APP_NAME}}",
-  "description": "A Privos MCP app (Instant — frontend-only, no runtime)",
+  "description": "A PrivOS MCP app started from the create-privos-mcp-app INSTANT template: a UI with no server.",
   "author": {
     "name": "Developer"
   },
@@ -13,10 +13,19 @@
     {
       "scope": "basic:information",
       "requirement": "required",
-      "context": "workspace",
+      "context": "room",
       "executionContext": "user",
-      "feature": "dashboard.core",
-      "reason": "Identify the active PrivOS installation."
+      "feature": "core.context",
+      "reason": "Identify the active room and the signed-in user so the dashboard knows where it is open."
+    },
+    {
+      "scope": "lists:read",
+      "requirement": "optional",
+      "context": "room",
+      "executionContext": "user",
+      "feature": "lists.overview",
+      "reason": "Show the lists of the room the dashboard is open in.",
+      "degradedBehavior": "The dashboard still opens and shows the room and the user, but it does not list the room's lists until this access is granted."
     }
   ],
   "ui": {

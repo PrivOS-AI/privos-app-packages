@@ -3,16 +3,23 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "manifest:lint": "npx --yes -p @privos_ai/app-server privos-app-lint",
-    "bundle:ui": "npx --yes -p @privos_ai/app-server privos-app bundle-ui --out ui-bundle.tar",
-    "publish:marketplace": "npx --yes -p @privos_ai/app-server privos-app publish"
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "manifest:lint": "privos-app lint privos-app.json",
+    "manifest:lint:publish": "privos-app lint privos-app.json --publish",
+    "bundle:ui": "privos-app bundle-ui --dist dist --out ui-bundle.tar",
+    "publish:marketplace": "privos-app publish"
   },
   "devDependencies": {
-    "@privos_ai/app-react": "^0.3.0",
+    "@privos_ai/app-react": "^0.8.0",
+    "@privos_ai/app-server": "^0.12.3",
     "@types/node": "^22.0.0",
     "@types/react": "^18.0.0",
     "@types/react-dom": "^18.0.0",
@@ -20,6 +27,7 @@
     "react": "^18.0.0",
     "react-dom": "^18.0.0",
     "typescript": "^5.0.0",
-    "vite": "^5.0.0"
+    "vite": "^5.0.0",
+    "vitest": "^2.1.9"
   }
 }

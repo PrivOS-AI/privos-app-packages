@@ -60,16 +60,17 @@ describe.each([
 		expect(pkg.scripts['bundle:ui']).toContain('bundle-ui');
 	});
 
-	it('never invokes an npx-run @privos_ai/app-server bin without -p (npx cannot pick a bin among two)', async () => {
+	it('calls the privos-app binaries of the installed SDK, never a package runner', async () => {
 		await scaffoldApp('demo-app', options);
 		const targetDir = path.join(workDir, 'demo-app');
 		const pkg = JSON.parse(fs.readFileSync(path.join(targetDir, 'package.json'), 'utf-8')) as {
 			scripts: Record<string, string>;
 		};
 		for (const [name, script] of Object.entries(pkg.scripts)) {
-			if (!script.includes('npx') || !script.includes('@privos_ai/app-server')) continue;
-			expect(script, `script "${name}": "${script}"`).toContain('-p @privos_ai/app-server');
+			expect(script, `script "${name}": "${script}"`).not.toMatch(/\bnpx\b/);
 		}
+		expect(pkg.scripts['manifest:lint:publish']).toBe('privos-app lint privos-app.json --publish');
+		expect(pkg.scripts['publish:marketplace']).toBe('privos-app publish');
 	});
 
 	it("bundles a real vite build's output into shell.html + assets-manifest.json + assets/*", async () => {

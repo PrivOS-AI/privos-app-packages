@@ -26,4 +26,25 @@ describe('parseScaffoldArgs', () => {
 	it('yields no app name when only the template flag is given', () => {
 		expect(parseScaffoldArgs(['--template', 'instant'])).toEqual({ appName: undefined, template: 'instant' });
 	});
+
+	it('parses --id in both forms, in any position', () => {
+		expect(parseScaffoldArgs(['my-app', '--id', 'ai.acme.my-app'])).toEqual({ appName: 'my-app', template: undefined, id: 'ai.acme.my-app' });
+		expect(parseScaffoldArgs(['--id=ai.acme.my-app', 'my-app'])).toEqual({ appName: 'my-app', template: undefined, id: 'ai.acme.my-app' });
+	});
+
+	it('parses --id together with --template', () => {
+		expect(parseScaffoldArgs(['my-app', '--template', 'instant', '--id', 'ai.acme.my-app'])).toEqual({
+			appName: 'my-app',
+			template: 'instant',
+			id: 'ai.acme.my-app',
+		});
+	});
+
+	it('yields an empty-string id (not undefined) for a trailing --id with no value', () => {
+		expect(parseScaffoldArgs(['my-app', '--id'])).toEqual({ appName: 'my-app', template: undefined, id: '' });
+	});
+
+	it('leaves the id unset when the flag is absent', () => {
+		expect(parseScaffoldArgs(['my-app']).id).toBeUndefined();
+	});
 });

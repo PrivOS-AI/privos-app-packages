@@ -1,0 +1,9 @@
+# Agent folders and instruction files stay out of the archive `privos-app publish` uploads.
+/.claude export-ignore
+/.agents export-ignore
+/.gemini export-ignore
+/.privos export-ignore
+/AGENTS.md export-ignore
+/CLAUDE.md export-ignore
+/GEMINI.md export-ignore
+/dist-source export-ignore

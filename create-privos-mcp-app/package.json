@@ -1,6 +1,6 @@
 {
   "name": "create-privos-mcp-app",
-  "version": "0.5.2",
+  "version": "0.6.0",
   "description": "CLI scaffolder for Privos MCP apps",
   "license": "MIT",
   "author": "PrivOS",
@@ -30,7 +30,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@privos_ai/app-server": "^0.10.0"
+    "@privos_ai/app-server": "^0.12.3"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

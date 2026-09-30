@@ -1,0 +1,29 @@
+node_modules/
+dist/
+dist-server/
+dist-source/
+ui-bundle.tar
+coverage/
+*.tsbuildinfo
+*.log
+.DS_Store
+
+# Environment files at any depth; only the example is committed
+.env
+.env.*
+*.env
+!.env.example
+
+# Pairing identity and its pending half: relay credentials and dispatch trust. Never commit.
+privos-standalone-identity*
+
+# Credentials and keys
+.npmrc
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# Local agent settings
+.claude/settings.local.json

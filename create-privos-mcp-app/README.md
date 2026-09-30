@@ -1,185 +1,112 @@
 # create-privos-mcp-app
 
-CLI scaffolder for [PrivOS](https://privos.io) MCP app projects. Generates a ready-to-run Express + React + TypeScript app with MCP protocol support.
+CLI scaffolder for [PrivOS](https://privos.io) MCP apps. It generates a TypeScript app that runs in your own workspace over Relay, and that passes the checks the PrivOS marketplace applies when you publish it.
 
-Version `0.3.0` adds the canonical Marketplace `privos-app.json`, production
-runtime-v3 dispatch verification, a production Dockerfile, NodeNext ESM server
-output and graceful container shutdown.
-
-Version `0.5.0` fixes production UIs rendering blank: the generated server now
-serves the built UI through `@privos_ai/app-server`'s `serveBuiltUi` helper
-instead of returning the raw Vite `index.html`. See
-[Production UI: assets served by the Hub](#production-ui-assets-served-by-the-hub)
-below — apps scaffolded from `0.4.0` or earlier keep the bug until upgraded.
-
-`--template instant` scaffolds an INSTANT (frontend-only, no runtime) app for
-a publisher that ships only a UI — no server, no Dockerfile, no
-`@privos_ai/app-server` dependency. See [Templates](#templates) below.
+Requires Node 22 or newer. The CLI warns on an older Node, and the generated app declares `engines.node >=22`.
 
 ## Usage
 
 ```bash
-npx create-privos-mcp-app my-app
+npx create-privos-mcp-app my-app --id com.acme.my-app
 cd my-app
-npm install
+npm install --include=dev
+git add -A && git commit -m "Initial commit"   # include package-lock.json
 npm run dev
 ```
 
+| Flag | Meaning |
+|------|---------|
+| `--id <id>` | The app id: `package.json` `name`, `privos-app.json` `name` and the host of every `ui://` URI. It must match `^[a-z0-9][a-z0-9._-]{1,127}$`, and the marketplace listing slug derived from it (lowercase, every run of other characters becomes one hyphen) must be 2-63 characters. The listing slug is globally unique, so pick an id you own, for example a reversed domain. Without the flag the id is the placeholder `com.example.<app-name>`, and the CLI says it must be replaced before publishing. |
+| `--template default\|instant` | Which template to scaffold. An unknown name exits with the list of valid ones. |
+
+`npm install --include=dev` matters: the build tools are development dependencies, and a shell that exports `NODE_ENV=production` makes a plain `npm install` skip them.
+
+### Git
+
+Publishing archives the repository root, so an app has to be its own repository. The scaffolder runs `git init -b main` when `git` is available and the new directory is not already inside a work tree. It never commits. Inside an existing repository, or without `git`, it says so and leaves the repository to you; a git failure never fails the scaffold. The marketplace build runs `npm ci`, so make the first commit with `package-lock.json` in it.
+
 ## Templates
 
-```bash
-npx create-privos-mcp-app my-app --template default    # Express + React + MCP server (the default)
-npx create-privos-mcp-app my-app --template instant     # frontend-only, no server, no Dockerfile
-```
-
-`default` scaffolds the full MCP app server described below. `instant`
-scaffolds only the Vite/React UI plus a `privos-app.json` declaring
-`executionMode: "INSTANT"` with a required `ui.entryPoints.roomTab` and an
-optional `agent` section — there is no runtime to configure, so `tools`,
-`serverUrl`/`runtimeTrustProvisioningUrl`, `port`, `resources`, `volumes` and
-`stateless` are all rejected by `privos-app lint` for this mode. An unknown
-`--template` name exits with the list of valid names.
-
-## What Gets Generated
+### `default`: a server app (runs over Relay or on the marketplace)
 
 ```
 my-app/
-├── privos-app.json         # Marketplace/runtime manifest, schema version 1
-├── Dockerfile              # Marketplace source-build entry point
-├── package.json            # @privos_ai SDKs, Express, React, Vite, TypeScript
-├── tsconfig.server.json    # Production server build
-├── vite.config.ts          # UI build config
-└── src/
-    ├── server.ts           # MCP server (manifest + JSON-RPC + UI serving)
-    └── ui/
-        ├── App.tsx            # PrivosAppProvider wrapper
-        ├── main.tsx           # React entry point; sets the boot flag the shell's watchdog waits for
-        └── lazy-boundary.tsx  # Error boundary for React.lazy panels — "Reload" on a stale chunk
+├── privos-app.json         # schema version 3 manifest: identity, permissions, data policy, tools
+├── Dockerfile              # node:22-alpine, non-root, no npm at runtime, health check on /health
+├── package.json
+├── gitignore → .gitignore  # secrets, identity file, build output; never the lockfile
+├── .gitattributes          # agent folders and instruction files stay out of the publish archive
+├── .dockerignore
+├── vite.config.ts          # UI build
+├── vitest.config.ts        # tests (separate from the UI build config)
+├── tsconfig.json           # typecheck: UI, scripts and tests
+├── tsconfig.server.json    # server build into dist-server/
+├── scripts/pair.ts         # npm run pair
+├── src/
+│   ├── server.ts           # serveApp entry point
+│   ├── tools.ts            # tool handlers: (arguments, context) => result
+│   ├── manifest.ts         # reads privos-app.json
+│   ├── dev-ui.ts           # live Vite UI for npm run dev
+│   └── ui/                 # React UI built on @privos_ai/app-react
+└── tests/                  # manifest invariants, tool tests
 ```
 
-## Generated Server
+| Script | Purpose |
+|--------|---------|
+| `npm run dev` | Watch mode with the UI served live from a Vite dev server. |
+| `npm run pair` | Connect the app to a workspace, once. |
+| `npm run build` | Build the UI into `dist/` and the server into `dist-server/`. |
+| `npm start` | Run the same app with the built UI. |
+| `npm test`, `npm run typecheck` | The starter tests and the type check. |
+| `npm run manifest:lint:publish` | Lint the manifest with the rules `publish` applies. |
+| `npm run publish:marketplace -- --dry-run` | Package the archive and print its hash; nothing is uploaded. |
 
-The Express server handles:
+The example tool (`<app>_whoami`) shows the rules for identity: take the caller and the room only from `context.actor` and `context.roomId`, never from the arguments; refuse when there is no verified actor. `tools/list` is the manifest's own tool list and `tools/call` dispatches by name.
 
-| Route | Purpose |
-|-------|---------|
-| `GET /.well-known/mcp/manifest.json` | Exact reviewed `privos-app.json` |
-| `POST /mcp` | JSON-RPC 2.0: `initialize`, `tools/list`, `resources/read` |
-| UI serving | Vite dev server (dev) or static files (prod) |
+The UI reads the lists of the room only when `usePrivosCapability('lists:read')` reports the grant, and shows a degraded state otherwise. `lists:read` is declared as an optional permission with a `degradedBehavior`, so a workspace admin can approve the app without it.
 
-## Generated UI
+### `instant`: a UI with no server
 
-Uses `@privos_ai/app-react` hooks:
-
-```tsx
-import { PrivosAppProvider, usePrivosContext, useLists } from '@privos_ai/app-react';
+```bash
+npx create-privos-mcp-app my-app --template instant --id com.acme.my-app
 ```
 
-The generated backend uses `@privos_ai/app-server`.
+An INSTANT app is the Vite and React UI plus a `privos-app.json` with `executionMode: "INSTANT"`, a `ui.entryPoints.roomTab` and an optional `agent` section. There is no runtime to configure, so `tools`, `port`, `resources`, `volumes` and `stateless` are rejected by the lint. `@privos_ai/app-server` is a development dependency that provides the `privos-app` commands. `npm run dev` previews the UI in a browser on this machine; it has no workspace connection. Whether an INSTANT app can be previewed inside a workspace is not settled, so this template has no `pair` script.
 
-## Production UI: assets served by the Hub
+## Relay: develop in your own workspace
 
-`npm run build` produces `dist/index.html` (the shell) plus content-hashed
-files under `dist/assets/` (Vite `base: './'`, `build.manifest: true`,
-`sourcemap: false`; no `publicDir` — everything the UI needs must ship as a
-hashed `assets/` file). The generated server never serves `dist/assets`
-itself: at production boot it constructs `serveBuiltUi({ distDir, appSlug })`
-once, and that instance answers `resources/read` for both the shell
-(`ui://<app>/dashboard.html`) and each asset (`ui://<app>/assets/<file>`) —
-the Hub fetches assets over the same MCP transport as the shell, caches them,
-and re-serves them from its own origin behind a short-lived per-user token so
-the `about:srcdoc` frame can load them cross-origin. This requires a Hub that
-understands the `<meta name="privos-ui-assets" content="relay">` opt-in the
-shell carries and the asset-relay route — **requires Hub ≥ tenant.N**. On an
-older Hub the shell's inline boot watchdog shows a "Retry" panel after
-10 seconds instead of rendering blank.
+Relay is one path for development and production. The workspace makes no difference between the two and the protocol is the same; Relay suits development because pairing takes far less procedure than a marketplace upload. There is one pairing and one identity file.
 
-`serveBuiltUi` validates the build at construction and throws (crashing the
-process at boot, not on the first request) if:
+1. Ask a workspace admin for a one-time pairing URL (Admin > Apps).
+2. `npm run pair` and paste the URL when asked. It is read from standard input, so it never lands in shell history. The app announces its `privos-app.json`; an admin then approves the permissions in the workspace, and the command waits for that. It ends by writing `privos-standalone-identity.json` (mode 0600) and printing the Hub fingerprint. Check the fingerprint with the person who issued the URL.
+3. `npm run dev`. The app runs in watch mode with signed dispatch and a verified caller, and the workspace page loads its UI live from Vite, so a UI edit shows up without a rebuild.
+4. `npm run build && npm start` runs the same pairing with the built UI, for a machine that stays up. The pairing and the workspace do not change.
 
-- any `<script>`/`<link>` tag in `index.html` is not `./assets/…` or
-  `assets/…` (the app was built without `base: './'`);
-- a file under `dist/assets` does not match the content-hashed filename rule
-  `name-<hash>.ext` (hash ≥ 8 chars) with an allowed extension (`js`, `css`,
-  `svg`, `json`, `woff`, `woff2`, `ttf`, `png`, `jpg`, `jpeg`, `gif`, `webp`,
-  `avif`, `ico`, `wasm`, `gz`);
-- a `.map` file is present under `dist/assets` (sourcemaps must never be
-  published — the build already disables them);
-- an asset exceeds 2 MB.
+Without an identity file, `npm run dev` starts in loopback development mode: the MCP endpoint is unsigned and there is no verified caller, so tools that need one refuse. It prints how to pair.
 
-Files that don't match the filename rule or aren't listed in the build's
-assets manifest are never served, even if they exist on disk.
+Good to know:
 
-## Production runtime boundary
+- The live UI is loaded by the browser that shows the workspace, from `http://localhost:5173`, so that browser must run on the machine that runs Vite, or reach it through a forwarded port. For a forwarded or tunnelled origin set `PRIVOS_DEV_UI_ORIGIN`, for example `PRIVOS_DEV_UI_ORIGIN=https://dev.example.com npm run dev`.
+- `privos-standalone-identity.json` and `privos-standalone-identity.pending.json` hold relay credentials and dispatch trust. The generated `.gitignore` and `.dockerignore` exclude them. Never commit them, copy them, or put their contents in an environment file. The watcher does not restart when they change.
+- Edit `privos-app.json` and the app reports the difference from the approved manifest on `/ready`; approve the update from the app's settings in the workspace. Re-pairing a live app is refused.
+- To pair again, uninstall the app in the workspace and delete the identity file.
+- **An app id is live once per workspace.** A Relay copy blocks a marketplace install of the same app id in that workspace. Uninstall the Relay copy before installing the same app from the marketplace there.
 
-The generated server refuses to start in production until
-`PRIVOS_RUNTIME_SECURITY_MODE` is set:
+## Publish to the marketplace
 
-- `managed-v2` requires the managed workload broker and legacy Cluster dispatch
-  assertion;
-- `runtime-v3` requires `PRIVOS_RUNTIME_DISPATCH_TRUST_V3`, parsed as the strict
-  `{hubKid,hubPublicJwk,affinity}` configuration accepted by
-  `parseRuntimeDispatchTrustV3Json`.
-
-Set `PRIVOS_RUNTIME_ALLOW_UNSIGNED_PREACTIVATION_READINESS=true` only for a
-Hub-supervised local runtime. It does not permit executable or data-bearing
-methods, and Relay ignores it. Publisher readiness never uses this exception.
-
-For `runtime-v3`, provisioning must supply the pinned Hub key and stable
-pre-start affinity (workspace, deployment, app, execution mode, generation,
-runtime installation, manifest digest, and resource-manifest hash). The server
-never learns trust from an inbound assertion. Local runtime configuration uses
-bounded process-local replay protection. Publisher configuration uses the
-durable single-process file store described below.
-
-For publisher-hosted mode, replace the placeholder
-`runtimeTrustProvisioningUrl` in `privos-app.json` with the canonical public
-HTTPS endpoint reviewed by Marketplace, then set:
-
-```dotenv
-PRIVOS_RUNTIME_SECURITY_MODE=runtime-v3
-PRIVOS_PUBLISHER_RUNTIME_TRUST_STORE_PATH=/var/lib/my-app/privos-runtime-trust.json
-PRIVOS_PUBLISHER_SINGLE_PROCESS=true
-PRIVOS_PORTAL_ISSUER=portal:marketplace-broker
-PRIVOS_PORTAL_JWKS_URL=https://portal.privos.io/approval-jwks
+```bash
+npm run manifest:lint:publish
+npm run publish:marketplace -- --dry-run
+npm run publish:marketplace
 ```
 
-The generated server mounts the trust endpoint before its JSON parser, verifies
-the Portal chain and Hub proof, persists atomic `PREPARED`/`ACTIVE` state, and
-uses the durable record as its dispatch trust resolver and replay store. The
-reference file store fails closed unless single-process mode is explicitly
-selected. Multiple processes or replicas require a shared transactional
-`PublisherRuntimeTrustDurableStoreV3` implementation.
-
-## Changing privos-app.json after pairing
-
-Edit `privos-app.json` and restart — the server sets `manifest` on the
-descriptor it passes to `connectRelay` (`src/server.ts:222`), so app-server
-echoes the loaded manifest and the Hub's Refresh detects the change. Re-pairing
-a live app is refused; use Hub Admin → Apps → your app → Settings → Refresh
-to review and approve the update instead.
-
-## Publish to PrivOS Marketplace
-
-Keep `privos-app.json` and `Dockerfile` at the project root. Package the project
-so both files are at the ZIP root, not inside an enclosing directory. The
-Marketplace reads the package version, app identity, scopes, tools, resource
-request, state model and license tiers from this manifest and validates it
-server-side.
-
-## Register in Privos
-
-1. Start the app: `npm run dev`
-2. In PrivOS Admin → Apps → Connect App
-3. Enter server URL (e.g., `http://localhost:3001`)
-4. Review and add the app to the Hub App Library
-5. Open a room and choose **Add to this room** when room access is wanted
+The archive is `git archive HEAD` of the app repository, so commit first, and keep `privos-app.json` (and `Dockerfile` for the default template) at the root. `.gitattributes` keeps `.claude/`, other agent folders and agent instruction files out of the archive. The `default` template builds with `npm ci` and runs bare, without a workload socket or an identity file, as the marketplace build does: it serves `/.well-known/mcp/manifest.json` and `/health`, keeps `/ready` at 503 and exposes no MCP surface. Publishing works for creators the marketplace has enabled; anyone else gets an explicit error and nothing is uploaded.
 
 ## Documentation
 
 - [Developer Guide](https://github.com/PrivOS-AI/privos-dev-docs/blob/main/mcp-app-platform/developer-guide.md)
 - [API Reference](https://github.com/PrivOS-AI/privos-dev-docs/blob/main/mcp-app-platform/api-reference.md)
-- [Demo App](https://github.com/PrivOS-AI/privos-demo-hrm)
+- [Reference app](https://github.com/PrivOS-AI/privos-mcp-app-demo) and [INSTANT reference app](https://github.com/PrivOS-AI/privos-okr-instant-app)
 
 ## License
 

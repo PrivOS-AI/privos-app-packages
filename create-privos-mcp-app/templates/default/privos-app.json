@@ -1,10 +1,10 @@
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "kind": "mcp-app",
   "name": "{{APP_ID}}",
   "version": "1.0.0",
   "title": "{{APP_NAME}}",
-  "description": "A Privos MCP app",
+  "description": "A PrivOS MCP app started from the create-privos-mcp-app template.",
   "author": {
     "name": "Developer"
   },
@@ -12,35 +12,56 @@
     {
       "scope": "basic:information",
       "requirement": "required",
-      "context": "workspace",
+      "context": "room",
       "executionContext": "user",
-      "feature": "dashboard.core",
-      "reason": "Identify the active PrivOS installation."
+      "feature": "core.context",
+      "reason": "Identify the active room and the signed-in user so the dashboard knows where it is open."
+    },
+    {
+      "scope": "lists:read",
+      "requirement": "optional",
+      "context": "room",
+      "executionContext": "user",
+      "feature": "lists.overview",
+      "reason": "Show the lists of the room the dashboard is open in.",
+      "degradedBehavior": "The dashboard still opens and shows the room and the user, but it does not list the room's lists until this access is granted."
     }
   ],
+  "dataPolicy": {
+    "version": "2026-10-01",
+    "retention": "The app keeps no data of its own: it reads what the workspace shows it and stores nothing.",
+    "externalProcessing": false
+  },
+  "capabilities": {
+    "verifiedActor": true
+  },
   "tools": [
     {
       "name": "{{APP_NAME}}_dashboard",
-      "title": "{{APP_NAME}} Dashboard",
-      "description": "Main dashboard view",
+      "title": "{{APP_NAME}} dashboard",
+      "description": "Open the dashboard of this app.",
       "inputSchema": {
         "type": "object",
-        "properties": {
-          "roomId": {
-            "type": "string"
-          }
-        }
+        "properties": {}
       },
       "ui": {
         "resourceUri": "ui://{{APP_ID}}/dashboard.html"
       }
+    },
+    {
+      "name": "{{APP_NAME}}_whoami",
+      "title": "Who am I",
+      "description": "Report the verified caller and the room this call was made from.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
     }
   ],
   "port": 3001,
-  "runtimeTrustProvisioningUrl": "https://your-app.example.com/.well-known/privos/runtime-trust/v3",
   "resources": {
-    "memoryMb": 512,
-    "cpus": 0.5,
+    "memoryMb": 256,
+    "cpus": 0.25,
     "tmpSizeMb": 64
   },
   "volumes": [],
