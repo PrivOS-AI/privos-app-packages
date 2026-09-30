@@ -90,6 +90,7 @@ Good to know:
 - `privos-standalone-identity.json` and `privos-standalone-identity.pending.json` hold relay credentials and dispatch trust. The generated `.gitignore` and `.dockerignore` exclude them. Never commit them, copy them, or put their contents in an environment file. The watcher does not restart when they change.
 - Edit `privos-app.json` and the app reports the difference from the approved manifest on `/ready`; approve the update from the app's settings in the workspace. Re-pairing a live app is refused.
 - To pair again, uninstall the app in the workspace and delete the identity file.
+- If `npm run pair` is interrupted before the approval, it leaves `privos-standalone-identity.pending.json` behind and refuses to start again. Remove the half-registered app in the workspace, delete that file, and pair with a new URL.
 - **An app id is live once per workspace.** A Relay copy blocks a marketplace install of the same app id in that workspace. Uninstall the Relay copy before installing the same app from the marketplace there.
 
 ## Publish to the marketplace

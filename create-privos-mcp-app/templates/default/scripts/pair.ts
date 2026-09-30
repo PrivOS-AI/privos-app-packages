@@ -13,9 +13,15 @@
  * There is one pairing for development and production alike. To pair again,
  * uninstall the app in the workspace and delete the identity file first.
  */
+import { existsSync } from 'node:fs';
 import readline from 'node:readline';
 
-import { buildPairingMetadata, pairAndAwaitApproval, standaloneIdentityFileExists } from '@privos_ai/app-server';
+import {
+  buildPairingMetadata,
+  pairAndAwaitApproval,
+  resolveStandalonePendingIdentityFilePath,
+  standaloneIdentityFileExists,
+} from '@privos_ai/app-server';
 
 import { buildDescriptor, loadManifest } from '../src/manifest.js';
 
@@ -33,6 +39,13 @@ async function main(): Promise<void> {
   if (standaloneIdentityFileExists()) {
     throw new Error(
       'This app is already paired: the identity file exists. To pair again, uninstall the app in the workspace and delete privos-standalone-identity.json.',
+    );
+  }
+
+  const pendingFile = resolveStandalonePendingIdentityFilePath();
+  if (existsSync(pendingFile)) {
+    throw new Error(
+      `An earlier pairing was started and never finished (${pendingFile} exists). Remove the half-registered app in the workspace (Admin > Apps), delete that file, and pair again with a new URL.`,
     );
   }
 
