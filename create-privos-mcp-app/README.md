@@ -131,6 +131,7 @@ The archive is `git archive HEAD` of the app repository, so commit first, and ke
 
 ## Documentation
 
+- [privos-mcp-app skill](https://github.com/PrivOS-AI/privos-mcp-app-skill): build an app with an AI agent such as Claude Code
 - [Developer Guide](https://github.com/PrivOS-AI/privos-dev-docs/blob/main/mcp-app-platform/developer-guide.md)
 - [API Reference](https://github.com/PrivOS-AI/privos-dev-docs/blob/main/mcp-app-platform/api-reference.md)
 - [Reference app](https://github.com/PrivOS-AI/privos-mcp-app-demo) and [INSTANT reference app](https://github.com/PrivOS-AI/privos-okr-instant-app)
