@@ -6,9 +6,10 @@ describe('buildBwrapArgs', () => {
 	const workspaceDir = '/home/user/privos-harness/agent-1';
 	const roomDir = join(workspaceDir, 'rooms', 'room-1');
 	const realHomeDir = '/home/user';
+	const resolvePath = (path: string): string => path;
 
 	it('orders every tmpfs over a PARENT before the --bind of its CHILD (M2)', () => {
-		const args = buildBwrapArgs({ workspaceDir, roomDir, homeDir: undefined, realHomeDir });
+		const args = buildBwrapArgs({ workspaceDir, roomDir, homeDir: undefined, realHomeDir, resolvePath });
 		const roomsRoot = join(workspaceDir, 'rooms');
 		const tmpfsRoomsIndex = indexOfPair(args, '--tmpfs', roomsRoot);
 		const bindRoomIndex = indexOfPair(args, '--bind', roomDir);
@@ -17,29 +18,45 @@ describe('buildBwrapArgs', () => {
 	});
 
 	it('tmpfs-hides every real credential/config dir (.ssh, .aws, .gnupg, .privos, .claude, .codex)', () => {
-		const args = buildBwrapArgs({ workspaceDir, roomDir, homeDir: undefined, realHomeDir });
+		const args = buildBwrapArgs({ workspaceDir, roomDir, homeDir: undefined, realHomeDir, resolvePath });
 		for (const dir of ['.ssh', '.aws', '.gnupg', '.privos', '.claude', '.codex']) {
 			expect(indexOfPair(args, '--tmpfs', join(realHomeDir, dir))).toBeGreaterThanOrEqual(0);
 		}
 	});
 
+	it('skips credential dirs that do not exist on the host (bwrap cannot create them under the read-only root)', () => {
+		const missing = join(realHomeDir, '.aws');
+		const args = buildBwrapArgs({ workspaceDir, roomDir, homeDir: undefined, realHomeDir, resolvePath: (path) => (path === missing ? undefined : path) });
+		expect(args.includes(missing)).toBe(false);
+		expect(indexOfPair(args, '--tmpfs', join(realHomeDir, '.ssh'))).toBeGreaterThanOrEqual(0);
+	});
+
+	it('mounts /var/run only when it is not a symlink to the already-hidden /run', () => {
+		const symlinked = buildBwrapArgs({ workspaceDir, roomDir, homeDir: undefined, realHomeDir, resolvePath: (path) => (path === '/var/run' ? '/run' : path) });
+		expect(symlinked.includes('/var/run')).toBe(false);
+		expect(indexOfPair(symlinked, '--tmpfs', '/run')).toBeGreaterThanOrEqual(0);
+
+		const realDir = buildBwrapArgs({ workspaceDir, roomDir, homeDir: undefined, realHomeDir, resolvePath });
+		expect(indexOfPair(realDir, '--tmpfs', '/var/run')).toBeGreaterThanOrEqual(0);
+	});
+
 	it('ro-binds the shared .privos dir and IDENTITY.md', () => {
-		const args = buildBwrapArgs({ workspaceDir, roomDir, homeDir: undefined, realHomeDir });
+		const args = buildBwrapArgs({ workspaceDir, roomDir, homeDir: undefined, realHomeDir, resolvePath });
 		expect(indexOfPair(args, '--ro-bind', join(workspaceDir, '.privos'))).toBeGreaterThanOrEqual(0);
 		expect(indexOfPair(args, '--ro-bind', join(workspaceDir, 'IDENTITY.md'))).toBeGreaterThanOrEqual(0);
 	});
 
 	it('binds a seeded per-room home dir rw when supplied, and omits it entirely otherwise', () => {
 		const homeDir = join(roomDir, '.home');
-		const withHome = buildBwrapArgs({ workspaceDir, roomDir, homeDir, realHomeDir });
+		const withHome = buildBwrapArgs({ workspaceDir, roomDir, homeDir, realHomeDir, resolvePath });
 		expect(indexOfPair(withHome, '--bind', homeDir)).toBeGreaterThanOrEqual(0);
 
-		const withoutHome = buildBwrapArgs({ workspaceDir, roomDir, homeDir: undefined, realHomeDir });
+		const withoutHome = buildBwrapArgs({ workspaceDir, roomDir, homeDir: undefined, realHomeDir, resolvePath });
 		expect(withoutHome.includes(homeDir)).toBe(false);
 	});
 
 	it('unshares every namespace but networking, and dies with the parent', () => {
-		const args = buildBwrapArgs({ workspaceDir, roomDir, homeDir: undefined, realHomeDir });
+		const args = buildBwrapArgs({ workspaceDir, roomDir, homeDir: undefined, realHomeDir, resolvePath });
 		expect(args).toEqual(expect.arrayContaining(['--unshare-all', '--share-net', '--die-with-parent']));
 	});
 });

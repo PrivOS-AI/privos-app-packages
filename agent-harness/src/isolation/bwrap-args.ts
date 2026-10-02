@@ -13,6 +13,7 @@
  * (`self-test.ts`) is what actually detects this and falls the level to
  * `container`/`prompt` rather than this module guessing.
  */
+import { realpathSync } from 'node:fs';
 import { join } from 'node:path';
 
 export interface BwrapArgsInput {
@@ -24,7 +25,19 @@ export interface BwrapArgsInput {
 	homeDir: string | undefined;
 	/** Real, un-sandboxed `$HOME` — source of the tmpfs'd `.ssh`/`.aws`/etc dirs. */
 	realHomeDir: string;
+	/** Resolves a host path to its real path, or `undefined` when it does not exist. Injectable for tests. */
+	resolvePath?: (path: string) => string | undefined;
 }
+
+function resolveHostPath(path: string): string | undefined {
+	try {
+		return realpathSync(path);
+	} catch {
+		return undefined;
+	}
+}
+
+const HIDDEN_HOME_DIRS = ['.ssh', '.aws', '.gnupg', '.privos', '.claude', '.codex'];
 
 /** Env vars the doc calls for once a room's process runs read-only-`$HOME` under bwrap (L2). */
 export const BWRAP_EXTRA_ENV: Record<string, string> = {
@@ -37,6 +50,7 @@ export function buildBwrapArgs(input: BwrapArgsInput): string[] {
 	const identityFile = join(input.workspaceDir, 'IDENTITY.md');
 	const roomsRoot = join(input.workspaceDir, 'rooms');
 
+	const resolvePath = input.resolvePath ?? resolveHostPath;
 	const args = [
 		'--unshare-all',
 		'--share-net',
@@ -52,20 +66,16 @@ export function buildBwrapArgs(input: BwrapArgsInput): string[] {
 		'/tmp',
 		'--tmpfs',
 		'/run',
-		'--tmpfs',
-		'/var/run',
-		'--tmpfs',
-		join(input.realHomeDir, '.ssh'),
-		'--tmpfs',
-		join(input.realHomeDir, '.aws'),
-		'--tmpfs',
-		join(input.realHomeDir, '.gnupg'),
-		'--tmpfs',
-		join(input.realHomeDir, '.privos'),
-		'--tmpfs',
-		join(input.realHomeDir, '.claude'),
-		'--tmpfs',
-		join(input.realHomeDir, '.codex'),
+	];
+	// Most distros ship /var/run as a symlink to /run, which is already hidden; bwrap cannot mount over the symlink.
+	const varRun = resolvePath('/var/run');
+	if (varRun !== undefined && varRun !== '/run') args.push('--tmpfs', '/var/run');
+	// bwrap cannot create a missing mount point under the read-only root, and a missing dir holds nothing to hide.
+	for (const dir of HIDDEN_HOME_DIRS) {
+		const hostDir = join(input.realHomeDir, dir);
+		if (resolvePath(hostDir) !== undefined) args.push('--tmpfs', hostDir);
+	}
+	args.push(
 		// tmpfs over the PARENT (rooms/) before binding the CHILD (this room) — M2.
 		'--tmpfs',
 		roomsRoot,
@@ -78,7 +88,7 @@ export function buildBwrapArgs(input: BwrapArgsInput): string[] {
 		'--ro-bind',
 		identityFile,
 		identityFile,
-	];
+	);
 	if (input.homeDir) args.push('--bind', input.homeDir, input.homeDir);
 	return args;
 }
