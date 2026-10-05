@@ -29,6 +29,7 @@ import { randomUUID } from 'node:crypto';
 import type { AdapterSpec } from '../acp/adapter-table.js';
 import { wrapCommand } from './wrap-command.js';
 import { seedAdapterState } from '../adapter-state.js';
+import { bridgeNodeModulesDir } from '../bridge-node-modules.js';
 
 export interface SelfTestCheck {
 	/** `undefined` when the underlying resource (a real `~/.claude`, an installed skills bundle, ...) does not exist on this machine — soft-skipped, not a failure. */
@@ -94,7 +95,6 @@ function runProbe(
 		probeEnv: Record<string, string>;
 	},
 ): Promise<{ code: number | null; stdout: string; stderr: string }> {
-	const bridgeNodeModulesDir = join(process.cwd(), 'node_modules');
 	const { command, args, env: wrapperEnv } = wrapCommand({
 		level,
 		workspaceDir: params.workspaceDir,
@@ -102,7 +102,7 @@ function runProbe(
 		roomDir: params.roomDir,
 		homeDir: params.homeDir,
 		realHomeDir: homedir(),
-		bridgeNodeModulesDir,
+		bridgeNodeModulesDir: bridgeNodeModulesDir(),
 		containerImage: params.containerImage,
 		command: 'sh',
 		args: ['-c', PROBE_SCRIPT],
@@ -193,7 +193,8 @@ export async function runSelfTest(
 	const identityProbe = existsSync(identityFile) ? identityFile : undefined;
 	const skillSdkPy = join(params.workspaceDir, '.privos', 'skill-sdk', 'privos_skill.py');
 	const pythonSdkAvailable = existsSync(skillSdkPy);
-	const nodeSdkAvailable = existsSync(join(process.cwd(), 'node_modules', '@privos_ai', 'skill-sdk'));
+	const nodeModulesDir = bridgeNodeModulesDir();
+	const nodeSdkAvailable = existsSync(join(nodeModulesDir, '@privos_ai', 'skill-sdk'));
 
 	try {
 		const probeEnv: Record<string, string> = {
@@ -204,7 +205,7 @@ export async function runSelfTest(
 			...(skillsProbeFile ? { SELF_TEST_SKILLS_PROBE: skillsProbeFile } : {}),
 			...(identityProbe ? { SELF_TEST_IDENTITY_PROBE: identityProbe } : {}),
 			...(pythonSdkAvailable ? { SELF_TEST_PYTHON_SDK_PROBE: '1', PYTHONPATH: join(params.workspaceDir, '.privos', 'skill-sdk') } : {}),
-			...(nodeSdkAvailable ? { SELF_TEST_NODE_SDK_PROBE: '1', NODE_PATH: join(process.cwd(), 'node_modules') } : {}),
+			...(nodeSdkAvailable ? { SELF_TEST_NODE_SDK_PROBE: '1', NODE_PATH: nodeModulesDir } : {}),
 			...homeState.env,
 		};
 

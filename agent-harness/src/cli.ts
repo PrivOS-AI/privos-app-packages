@@ -7,11 +7,11 @@
  */
 import { homedir, hostname } from 'node:os';
 import { mkdirSync } from 'node:fs';
-import { join, sep } from 'node:path';
-import { createRequire } from 'node:module';
+import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { Command } from 'commander';
 import { AcpSession } from './acp/acp-session.js';
+import { bridgeNodeModulesDir } from './bridge-node-modules.js';
 import { ADAPTER_TABLE, resolveAdapterCommand, type AdapterId, type AdapterSpec } from './acp/adapter-table.js';
 import type { PermissionPolicy } from './acp/permission-policy.js';
 import { loadConfig, resolveAgentId, saveConfig, type AgentHarnessRespondTo } from './config-store.js';
@@ -47,15 +47,6 @@ const ROOM_IDLE_REAP_MS = 10 * 60 * 1000;
 const DEFAULT_CONTAINER_IMAGE = 'node:22-bookworm';
 
 /** Default per-agent workspace: `~/privos-harness/<agentId>`, outside the hidden bridge config dir. */
-/**
- * The node_modules dir that actually holds `@privos_ai/skill-sdk`. npm hoists it
- * next to the bridge (e.g. under npx), so `<bridge>/node_modules` may not exist.
- */
-function bridgeNodeModulesDir(): string {
-	const resolved = createRequire(import.meta.url).resolve('@privos_ai/skill-sdk');
-	return resolved.slice(0, resolved.lastIndexOf(`${sep}@privos_ai${sep}skill-sdk${sep}`));
-}
-
 function defaultWorkspaceDir(agentId: string): string {
 	return join(process.env.HOME ?? process.env.USERPROFILE ?? '.', 'privos-harness', agentId);
 }
