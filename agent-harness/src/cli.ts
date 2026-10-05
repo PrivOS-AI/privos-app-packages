@@ -7,8 +7,8 @@
  */
 import { homedir, hostname } from 'node:os';
 import { mkdirSync } from 'node:fs';
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join, sep } from 'node:path';
+import { createRequire } from 'node:module';
 import { spawnSync } from 'node:child_process';
 import { Command } from 'commander';
 import { AcpSession } from './acp/acp-session.js';
@@ -47,6 +47,15 @@ const ROOM_IDLE_REAP_MS = 10 * 60 * 1000;
 const DEFAULT_CONTAINER_IMAGE = 'node:22-bookworm';
 
 /** Default per-agent workspace: `~/privos-harness/<agentId>`, outside the hidden bridge config dir. */
+/**
+ * The node_modules dir that actually holds `@privos_ai/skill-sdk`. npm hoists it
+ * next to the bridge (e.g. under npx), so `<bridge>/node_modules` may not exist.
+ */
+function bridgeNodeModulesDir(): string {
+	const resolved = createRequire(import.meta.url).resolve('@privos_ai/skill-sdk');
+	return resolved.slice(0, resolved.lastIndexOf(`${sep}@privos_ai${sep}skill-sdk${sep}`));
+}
+
 function defaultWorkspaceDir(agentId: string): string {
 	return join(process.env.HOME ?? process.env.USERPROFILE ?? '.', 'privos-harness', agentId);
 }
@@ -352,7 +361,7 @@ async function runStart(options: StartOptions): Promise<void> {
 	// `require` resolves them from any skill script's cwd. `PRIVOS_SANDBOX_MODE`
 	// is never set — the skills' own dual-mode env check already falls back to
 	// `PRIVOS_URL`/`PRIVOS_BOT_KEY` when it's absent.
-	const bridgeNodeModules = fileURLToPath(new URL('../node_modules', import.meta.url));
+	const bridgeNodeModules = bridgeNodeModulesDir();
 	const skillSdkPythonPath = join(workspaceDir, '.privos', 'skill-sdk');
 	baseEnv.PYTHONPATH = [skillSdkPythonPath, baseEnv.PYTHONPATH].filter(Boolean).join(':');
 	baseEnv.NODE_PATH = [bridgeNodeModules, baseEnv.NODE_PATH].filter(Boolean).join(':');
@@ -494,7 +503,9 @@ async function runStart(options: StartOptions): Promise<void> {
 	process.once('SIGINT', shutdown);
 	process.once('SIGTERM', shutdown);
 
-	// Keep the process alive until whenTerminal / a signal ends it.
+	// Park here until whenTerminal / a signal ends the process. This promise
+	// holds no event-loop handle; the open socket or the pending reconnect
+	// timer in HubRelayClient is what keeps the process alive.
 	await new Promise<void>(() => undefined);
 }
 
@@ -591,7 +602,7 @@ async function runDoctor(options: { agent?: string; adapter: AdapterId; command?
 	// instead of surfacing mid-turn as an opaque "Cannot find module".
 	const workspaceDir = options.workspace ?? defaultWorkspaceDir(resolvedAgentId);
 	const skillSdkPythonPath = join(workspaceDir, '.privos', 'skill-sdk');
-	const bridgeNodeModules = fileURLToPath(new URL('../node_modules', import.meta.url));
+	const bridgeNodeModules = bridgeNodeModulesDir();
 
 	console.log('\nskill-sdk smoke imports:');
 	const pythonSmoke = spawnSync('python3', ['-c', 'import privos_skill'], {

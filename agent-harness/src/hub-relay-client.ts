@@ -270,8 +270,10 @@ export class HubRelayClient {
 		if (this.stopped || this.terminal) return;
 		const delay = BACKOFF_MS[Math.min(this.backoffIndex, BACKOFF_MS.length - 1)] ?? 60_000;
 		this.backoffIndex = Math.min(this.backoffIndex + 1, BACKOFF_MS.length - 1);
+		// Stays ref'd: an idle bridge has no other live handle once the socket
+		// drops, so an unref'd timer would let Node exit before reconnecting.
+		// stop() clears it, so a deliberate shutdown still exits.
 		this.reconnectTimer = setTimeout(() => void this.connectOnce(), delay);
-		this.reconnectTimer.unref?.();
 	}
 
 	private setTerminal(reason: TerminalReason): void {
@@ -318,25 +320,32 @@ export class HubRelayClient {
 		ws.addEventListener('message', (event: MessageEvent) => {
 			void this.handleMessage(event.data);
 		});
-		ws.addEventListener('error', () => {
-			// Surfaced as a subsequent `close`; nothing actionable here beyond logging.
-		});
-		ws.addEventListener('close', (event: CloseEvent) => {
+		let ended = false;
+		const onEnded = (code: number, reason: string): void => {
+			if (ended) return;
+			ended = true;
 			if (this.ws === ws) this.ws = undefined;
 			if (this.disconnectedSince === undefined) this.disconnectedSince = Date.now();
 			this.opts.handlers.onConnectionChange?.(false);
 			this.helloResult = undefined;
-			this.rejectAllPending(new Error(`connection closed: ${event.code}`));
-			if (event.code === 4409) {
-				this.setTerminal({ kind: 'replaced', hostname: event.reason || undefined });
+			this.rejectAllPending(new Error(`connection closed: ${code}`));
+			if (code === 4409) {
+				// The hub's reason is `replaced by <hostname>`; keep only the hostname.
+				this.setTerminal({ kind: 'replaced', hostname: reason.replace(/^replaced by /, '') || undefined });
 				return;
 			}
-			if (event.code === 4401) {
+			if (code === 4401) {
 				this.setTerminal({ kind: 'revoked' });
 				return;
 			}
 			this.scheduleReconnect();
+		};
+		ws.addEventListener('error', () => {
+			// Node's WebSocket fires no `close` when the connect itself fails (e.g.
+			// ECONNREFUSED while the hub is still down), so that error ends the attempt.
+			if (ws.readyState === ws.CONNECTING) onEnded(1006, '');
 		});
+		ws.addEventListener('close', (event: CloseEvent) => onEnded(event.code, event.reason));
 	}
 
 	private rejectAllPending(err: Error): void {

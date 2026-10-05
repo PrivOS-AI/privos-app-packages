@@ -114,7 +114,7 @@ describe('HubRelayClient', () => {
 
 		hub.readyConnections[0]!.close(4409, 'replaced by other-laptop');
 		const reason = await client.whenTerminal;
-		expect(reason).toEqual({ kind: 'replaced', hostname: 'replaced by other-laptop' });
+		expect(reason).toEqual({ kind: 'replaced', hostname: 'other-laptop' });
 
 		await new Promise((resolve) => setTimeout(resolve, 1200));
 		expect(hub.readyConnections).toHaveLength(1); // no reconnect attempt
@@ -152,6 +152,29 @@ describe('HubRelayClient', () => {
 		hub.readyConnections[0]!.close(1001, 'going away');
 		await vi.waitFor(() => expect(hub.readyConnections).toHaveLength(2), { timeout: 5_000, interval: 100 });
 		expect(client.isConnected()).toBe(true);
+	});
+
+	it('a pending reconnect keeps the process alive', async () => {
+		// An idle bridge has no other live handle once the socket drops, so an
+		// unref'd reconnect timer lets Node exit before the reconnect fires.
+		client = new HubRelayClient({ hubUrl, botToken: GOOD_TOKEN, hello: helloParams(), handlers: fakeHandlers() });
+		client.start();
+		await vi.waitFor(() => expect(hub.readyConnections).toHaveLength(1));
+
+		hub.readyConnections[0]!.close(1001, 'going away');
+		const internals = client as unknown as { reconnectTimer?: NodeJS.Timeout };
+		await vi.waitFor(() => expect(internals.reconnectTimer).toBeDefined(), { timeout: 900, interval: 10 });
+		expect(internals.reconnectTimer!.hasRef()).toBe(true);
+	});
+
+	it('keeps retrying while the hub refuses connections', async () => {
+		// A refused connect fires `error` but no `close` on Node's WebSocket.
+		await hub.close();
+		const onConnectionChange = vi.fn();
+		client = new HubRelayClient({ hubUrl, botToken: GOOD_TOKEN, hello: helloParams(), handlers: fakeHandlers({ onConnectionChange }) });
+		client.start();
+		await vi.waitFor(() => expect(onConnectionChange).toHaveBeenCalledTimes(2), { timeout: 3_000, interval: 50 });
+		expect(onConnectionChange).toHaveBeenCalledWith(false);
 	});
 });
 
