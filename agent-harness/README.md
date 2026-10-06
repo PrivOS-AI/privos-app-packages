@@ -92,17 +92,27 @@ is connected. Two layers keep it alive — the same split Buzz uses for its
   host without systemd, `start --detach` at least moves the bridge out of the
   launching shell/exec session — but nothing restarts it afterwards.
 
-A hub-initiated stop is final and exits `0`: pairing rotated (`4401`), another
-bridge took over (`4409`), or the agent's runtime was switched. A service
-manager therefore does not restart the bridge against a revoked token; only
-an unexpected failure exits non-zero and triggers `Restart=on-failure`.
+A hub-initiated stop is final and exits `78`: pairing rotated (`4401`), another
+bridge took over (`4409`), the agent's runtime was switched, or the connection
+was refused as unauthorized. The unit lists `78` in `RestartPreventExitStatus=`,
+so systemd does not restart the bridge against a revoked token or let it fight
+the bridge that took over; any other failure triggers `Restart=on-failure`.
+Under another supervisor, treat `78` as "do not restart" (with Docker
+`--restart on-failure`, map it to `0` in the container command). Units written
+by 0.2.x lack that line: run `service install` again to refresh them.
+
+Run from `npx`, the bridge lives in npm's cache, which npm may prune. So
+`service install` (and `pair --install-service`) first installs the same
+version globally with the npm next to the running node, and the unit runs that
+install. If the global install needs root, install it yourself
+(`npm install -g @privos_ai/agent-harness`) and run `service install` again.
 
 **If you are an AI coding agent or harness pairing on the owner's behalf**
 (Claude Code, OpenClaw, Hermes, …): never run `start` as a background job of
 your own exec/tool session. Such a job is a child of your session — OpenClaw
 kills it after `tools.exec.timeoutSeconds` (30 min by default), Hermes ends it
-with the session. Run `pair <guideUrl> --install-service`, or `service
-install`, or at minimum `start --detach`.
+with the session. Run `npx @privos_ai/agent-harness pair <guideUrl> --install-service`,
+or `service install`, or at minimum `start --detach`.
 
 ## Commands
 

@@ -5,7 +5,7 @@
  * Commands: pair | start | status | doctor. See README.md for the security
  * model (default `--permissions auto` runs tool calls unattended).
  */
-import { homedir, hostname } from 'node:os';
+import { homedir, hostname, platform } from 'node:os';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -40,7 +40,7 @@ import { seedAdapterState } from './adapter-state.js';
 import { resolveIsolation, runSelfTest, wrapCommand, type BaseIsolationLevel } from './isolation/index.js';
 import { redact } from './redact.js';
 import { BRIDGE_VERSION } from './version.js';
-import { installSystemdService, uninstallSystemdService, statusSystemdService, defaultUnitName, buildServiceStartArgs } from './service-install.js';
+import { installSystemdService, uninstallSystemdService, statusSystemdService, defaultUnitName, buildServiceStartArgs, isNpxCachePath, TERMINAL_EXIT_CODE } from './service-install.js';
 import { buildDetachedArgv, detachedLogPath, spawnDetached } from './start-detach.js';
 
 /** Pool cap 8 / idle reap 10 min — fixed by user decision (validation session 10), not a CLI knob. */
@@ -178,6 +178,11 @@ function adapterFlagsHint(adapter: string | undefined): string {
 	return adapter === 'custom' ? '--adapter custom --command "<your ACP command>"' : `--adapter ${adapter}`;
 }
 
+/** How to call this CLI again: run from npx's cache it is not on PATH, so hints must go through npx. */
+function cliInvocation(): string {
+	return isNpxCachePath(process.argv[1] ?? '') ? 'npx @privos_ai/agent-harness' : 'privos-agent-harness';
+}
+
 interface PairOptions {
 	insecure?: boolean;
 	noSkills?: boolean;
@@ -190,12 +195,21 @@ interface PairOptions {
 	permissions?: string;
 }
 
+/** How `pair --install-service` will run the bridge; resolved before the one-time keys are fetched. */
+interface ServicePlan {
+	adapter: AdapterId;
+	isolation: string;
+	permissions: string;
+	adapterCommand: string;
+}
+
 /**
- * `pair --install-service`: hands the freshly paired bridge to systemd in the
- * same command, so an operator -- or an AI harness pairing on the owner's
- * behalf -- never has to background `start` inside its own session.
+ * Validates every `--install-service` input up front: the pairing keys are
+ * single-use, so a bad flag found after fetching them would burn the link and
+ * force the owner to rotate the pairing.
  */
-function installServiceAfterPair(agentId: string, guide: PairingGuide, options: PairOptions): void {
+function resolveServicePlan(guide: PairingGuide, options: PairOptions): ServicePlan {
+	if (platform() !== 'linux') fail(`--install-service installs a systemd user unit and only runs on Linux. On ${platform()}, pair without it and use "start --detach".`);
 	const adapter = options.adapter ?? guide.adapter;
 	if (!adapter || !ADAPTER_IDS.includes(adapter as AdapterId)) {
 		fail(`--install-service needs a known adapter: pass --adapter <${ADAPTER_IDS.join('|')}> (the pairing guide named "${adapter ?? 'none'}").`);
@@ -206,11 +220,22 @@ function installServiceAfterPair(agentId: string, guide: PairingGuide, options: 
 	const permissions = options.permissions ?? 'safe';
 	if (!PERMISSION_POLICIES.includes(permissions as PermissionPolicy)) fail(`--permissions must be one of: ${PERMISSION_POLICIES.join(', ')}`);
 	const { command: adapterCommand } = resolveAdapterCommand(adapter as AdapterId, options.command);
+	return { adapter: adapter as AdapterId, isolation, permissions, adapterCommand };
+}
+
+/**
+ * `pair --install-service`: hands the freshly paired bridge to systemd in the
+ * same command, so an operator -- or an AI harness pairing on the owner's
+ * behalf -- never has to background `start` inside its own session. The
+ * pairing is already saved at this point, so a failed install says so and
+ * prints the command that finishes the job instead of suggesting a re-pair.
+ */
+function installServiceAfterPair(agentId: string, plan: ServicePlan, options: PairOptions): void {
 	const startArgs = buildServiceStartArgs({
 		agentId,
-		adapter,
-		isolation,
-		permissions,
+		adapter: plan.adapter,
+		isolation: plan.isolation,
+		permissions: plan.permissions,
 		maxRooms: 8,
 		idleTimeout: 600,
 		command: options.command,
@@ -219,7 +244,16 @@ function installServiceAfterPair(agentId: string, guide: PairingGuide, options: 
 		skillsDir: options.skillsDir,
 	});
 	console.log('');
-	installSystemdService({ agentId, unitName: defaultUnitName(agentId), startArgs, adapterCommand, linger: true, enable: true, print: false });
+	try {
+		installSystemdService({ agentId, unitName: defaultUnitName(agentId), startArgs, adapterCommand: plan.adapterCommand, linger: true, enable: true, print: false, version: BRIDGE_VERSION });
+	} catch (e) {
+		const command = options.command ? ` --command ${JSON.stringify(options.command)}` : '';
+		fail(
+			`Paired, but the service was not installed: ${e instanceof Error ? e.message : String(e)}\n` +
+				`Do not run "pair" again (its keys are single-use). Fix the cause, then run:\n` +
+				`  ${cliInvocation()} service install --agent ${agentId} --adapter ${plan.adapter}${command} --isolation ${plan.isolation} --permissions ${plan.permissions}`,
+		);
+	}
 }
 
 function parsePairingKeys(body: unknown): PairingKeys {
@@ -251,6 +285,8 @@ async function runPair(guideUrl: string, options: PairOptions): Promise<void> {
 		console.log(guide.isolationAdvice);
 	}
 	console.log('');
+
+	const servicePlan = options.installService ? resolveServicePlan(guide, options) : undefined;
 
 	assertSecureUrl(guide.keysUrl, Boolean(options.insecure), 'the pairing keys link');
 	const keysResponse = await fetchJson(guide.keysUrl).catch((error: unknown) => {
@@ -286,15 +322,15 @@ async function runPair(guideUrl: string, options: PairOptions): Promise<void> {
 		pairedAt: new Date().toISOString(),
 	});
 	console.log(`Paired. Config written to ${path} (mode 0600).`);
-	if (options.installService) {
-		installServiceAfterPair(keys.agentId, guide, options);
+	if (servicePlan) {
+		installServiceAfterPair(keys.agentId, servicePlan, options);
 		return;
 	}
 	const adapterFlags = adapterFlagsHint(options.adapter ?? guide.adapter);
 	console.log('Keep the bridge running as a service (recommended; Linux systemd):');
-	console.log(`  privos-agent-harness service install --agent ${keys.agentId} ${adapterFlags}`);
+	console.log(`  ${cliInvocation()} service install --agent ${keys.agentId} ${adapterFlags}`);
 	console.log('Without systemd, run it detached from this session:');
-	console.log(`  privos-agent-harness start --agent ${keys.agentId} ${adapterFlags} --detach`);
+	console.log(`  ${cliInvocation()} start --agent ${keys.agentId} ${adapterFlags} --detach`);
 	console.log('If you are an AI harness pairing on the owner\'s behalf: do not run "start" as a background job of your own exec session -- it dies with that session.');
 }
 
@@ -569,10 +605,10 @@ async function runStart(options: StartOptions): Promise<void> {
 						: 'Connection rejected as unauthorized.';
 		console.error(`\n${message}`);
 		// A hub-initiated stop is intentional and final (rotated token, another
-		// bridge took over, runtime switched): exit 0 so a supervisor with
-		// `Restart=on-failure` (service install) does not loop against a
-		// revoked token. Only unexpected failures exit non-zero.
-		void pool.dispose().finally(() => process.exit(0));
+		// bridge took over, runtime switched): exit TERMINAL_EXIT_CODE, which the
+		// service unit lists in RestartPreventExitStatus, so a supervisor does not
+		// loop against a revoked token or fight the bridge that took over.
+		void pool.dispose().finally(() => process.exit(TERMINAL_EXIT_CODE));
 	});
 
 	const shutdown = () => {
@@ -858,6 +894,7 @@ service
 				linger: opts.linger !== false,
 				enable: opts.enable !== false,
 				print: Boolean(opts.print),
+				version: BRIDGE_VERSION,
 			});
 		} catch (e) {
 			fail(e instanceof Error ? e.message : String(e));

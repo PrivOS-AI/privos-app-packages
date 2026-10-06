@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildServiceStartArgs, buildSystemdUnit, defaultUnitName } from '../src/service-install.js';
+import { buildServiceStartArgs, buildSystemdUnit, defaultUnitName, globalEntryScript, isNpxCachePath, TERMINAL_EXIT_CODE } from '../src/service-install.js';
 
 describe('buildServiceStartArgs', () => {
 	const base = { agentId: 'abc123', adapter: 'claude', isolation: 'auto', permissions: 'safe', maxRooms: 8, idleTimeout: 600 };
@@ -62,6 +62,12 @@ describe('buildSystemdUnit', () => {
 		expect(unit.slice(unit.indexOf('[Service]'))).not.toContain('StartLimit');
 	});
 
+	it('does not restart after a hub-initiated stop, which exits TERMINAL_EXIT_CODE', () => {
+		const service = buildSystemdUnit(base).split('[Service]')[1] ?? '';
+		expect(service).toContain('Restart=on-failure');
+		expect(service).toContain(`RestartPreventExitStatus=${TERMINAL_EXIT_CODE}`);
+	});
+
 	it('dedupes PATH dirs (caller dir already in defaults) and keeps order', () => {
 		const unit = buildSystemdUnit({ ...base, pathDirs: ['/usr/bin', '/opt/adapter/bin'] });
 		expect(unit).toContain('Environment=PATH=/usr/bin:/opt/adapter/bin:/usr/local/bin:/bin');
@@ -74,5 +80,17 @@ describe('buildSystemdUnit', () => {
 
 	it('defaultUnitName is filesystem-safe and agent-scoped', () => {
 		expect(defaultUnitName('abc/123')).toBe('privos-agent-harness-abc-123');
+	});
+});
+
+describe('service script path', () => {
+	it('recognises a bridge running from npx\'s cache, which npm may prune', () => {
+		expect(isNpxCachePath('/home/op/.npm/_npx/454ef4255afb9ba0/node_modules/@privos_ai/agent-harness/dist/cli.js')).toBe(true);
+		expect(isNpxCachePath('/home/op/.nvm/versions/node/v22.23.2/bin/privos-agent-harness')).toBe(false);
+		expect(isNpxCachePath('/srv/my_npx_tools/cli.js')).toBe(false);
+	});
+
+	it('points the unit at the global install under npm prefix -g', () => {
+		expect(globalEntryScript('/home/op/.nvm/versions/node/v22.23.2')).toBe('/home/op/.nvm/versions/node/v22.23.2/lib/node_modules/@privos_ai/agent-harness/dist/cli.js');
 	});
 });

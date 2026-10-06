@@ -17,7 +17,15 @@
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs';
 import { homedir, userInfo, platform } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, sep } from 'node:path';
+
+/**
+ * Exit code for a stop the hub initiated (pairing rotated, another bridge took
+ * over, runtime switched, connection refused as unauthorized). It is final:
+ * the unit lists it in `RestartPreventExitStatus=`, so systemd does not restart
+ * the bridge against a revoked token, while scripts still see a non-zero exit.
+ */
+export const TERMINAL_EXIT_CODE = 78;
 
 export interface SystemdUnitParams {
 	/** Human description line; the agent id is embedded so multiple services are distinguishable. */
@@ -59,6 +67,7 @@ Environment=PATH=${pathValue}
 EnvironmentFile=-${params.envFile}
 ExecStart=${execStart}
 Restart=on-failure
+RestartPreventExitStatus=${TERMINAL_EXIT_CODE}
 RestartSec=5
 
 [Install]
@@ -77,6 +86,43 @@ function commandDir(command: string): string | undefined {
 	if (res.status !== 0 || !res.stdout) return undefined;
 	const first = res.stdout.split('\n')[0]?.trim();
 	return first ? dirname(first) : undefined;
+}
+
+/** True when this bridge runs from npx's cache (`~/.npm/_npx/<hash>/…`), which npm may prune at any time. */
+export function isNpxCachePath(scriptPath: string): boolean {
+	return scriptPath.split(sep).includes('_npx');
+}
+
+/** Entry script of the global install under `npm prefix -g`. */
+export function globalEntryScript(npmPrefix: string): string {
+	return join(npmPrefix, 'lib', 'node_modules', '@privos_ai', 'agent-harness', 'dist', 'cli.js');
+}
+
+/**
+ * The script a unit should run. A unit that pointed into npx's cache would
+ * stop starting once npm pruned it, so from npx this installs the same bridge
+ * version globally (with the npm next to the running node) and returns that
+ * install's entry script. `dryRun` only computes the path.
+ */
+function serviceScriptPath(nodePath: string, version: string, dryRun: boolean): string {
+	const current = process.argv[1] ?? '';
+	if (!isNpxCachePath(current)) return current;
+	const npmBin = existsSync(join(dirname(nodePath), 'npm')) ? join(dirname(nodePath), 'npm') : 'npm';
+	const prefix = spawnSync(npmBin, ['prefix', '-g'], { encoding: 'utf-8', timeout: 30_000 }).stdout?.trim();
+	if (!prefix) throw new Error('could not read the global npm prefix ("npm prefix -g").');
+	const target = globalEntryScript(prefix);
+	const pkg = `@privos_ai/agent-harness@${version}`;
+	if (dryRun) {
+		process.stderr.write(`note: this unit runs the global install at ${target}; install it first with: npm install -g ${pkg}\n`);
+		return target;
+	}
+	process.stdout.write(`installing ${pkg} globally so the service does not run from npx's cache...\n`);
+	const res = spawnSync(npmBin, ['install', '-g', pkg], { encoding: 'utf-8', timeout: 300_000 });
+	if (res.status !== 0 || !existsSync(target)) {
+		const detail = (res.stderr || res.error?.message || '').trim().split('\n').slice(-3).join(' ');
+		throw new Error(`could not install ${pkg} globally (${detail}). Install it yourself (a system node may need sudo or an npm prefix you own), then run "privos-agent-harness service install" again.`);
+	}
+	return target;
 }
 
 export interface ServiceStartArgsInput {
@@ -138,12 +184,17 @@ export interface ServiceInstallInput {
 	enable: boolean;
 	/** Print the unit to stdout instead of writing/enabling (works on any platform). */
 	print: boolean;
+	/** Bridge version to pin when moving off npx's cache. */
+	version: string;
 }
 
 /** Writes + enables the systemd user unit. Returns the path written (or undefined for `--print`). */
 export function installSystemdService(input: ServiceInstallInput): string | undefined {
 	const nodePath = process.execPath;
-	const scriptPath = process.argv[1] ?? '';
+	if (!input.print && platform() !== 'linux') {
+		throw new Error(`"service install" installs a systemd user unit and only runs on Linux. On ${platform()} run "service install --print" and adapt the output to your init system (e.g. launchd).`);
+	}
+	const scriptPath = serviceScriptPath(nodePath, input.version, input.print);
 	const pathDirs = [dirname(nodePath), commandDir(input.adapterCommand)].filter((d): d is string => Boolean(d));
 	const envFile = join(homedir(), '.config', `${input.unitName}.env`);
 	const unit = buildSystemdUnit({ agentId: input.agentId, nodePath, scriptPath, startArgs: input.startArgs, pathDirs, envFile });
@@ -151,9 +202,6 @@ export function installSystemdService(input: ServiceInstallInput): string | unde
 	if (input.print) {
 		process.stdout.write(unit);
 		return undefined;
-	}
-	if (platform() !== 'linux') {
-		throw new Error(`"service install" installs a systemd user unit and only runs on Linux. On ${platform()} run "service install --print" and adapt the output to your init system (e.g. launchd).`);
 	}
 
 	const path = unitPath(input.unitName);
