@@ -50,6 +50,8 @@ export function buildSystemdUnit(params: SystemdUnitParams): string {
 Description=PrivOS agent-harness bridge (agent ${params.agentId})
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -58,8 +60,6 @@ EnvironmentFile=-${params.envFile}
 ExecStart=${execStart}
 Restart=on-failure
 RestartSec=5
-StartLimitIntervalSec=60
-StartLimitBurst=5
 
 [Install]
 WantedBy=default.target
@@ -77,6 +77,52 @@ function commandDir(command: string): string | undefined {
 	if (res.status !== 0 || !res.stdout) return undefined;
 	const first = res.stdout.split('\n')[0]?.trim();
 	return first ? dirname(first) : undefined;
+}
+
+export interface ServiceStartArgsInput {
+	agentId: string;
+	adapter: string;
+	isolation: string;
+	permissions: string;
+	maxRooms: string | number;
+	idleTimeout: string | number;
+	command?: string;
+	workspace?: string;
+	/** Only baked in when `isolation === 'container'`. */
+	containerImage?: string;
+	insecure?: boolean;
+	noSkills?: boolean;
+	skillsDir?: string;
+}
+
+/**
+ * The explicit `start ...` argv a service unit runs. Defaults are spelled out
+ * so the unit fully documents how the service runs; shared by `service install`
+ * and `pair --install-service` so the two never drift. Pure — no IO.
+ */
+export function buildServiceStartArgs(input: ServiceStartArgsInput): string[] {
+	const args = [
+		'start',
+		'--agent',
+		input.agentId,
+		'--adapter',
+		input.adapter,
+		'--isolation',
+		input.isolation,
+		'--permissions',
+		input.permissions,
+		'--max-rooms',
+		String(input.maxRooms),
+		'--idle-timeout',
+		String(input.idleTimeout),
+	];
+	if (input.command) args.push('--command', input.command);
+	if (input.workspace) args.push('--workspace', input.workspace);
+	if (input.isolation === 'container' && input.containerImage) args.push('--container-image', input.containerImage);
+	if (input.insecure) args.push('--insecure');
+	if (input.noSkills) args.push('--no-skills');
+	if (input.skillsDir) args.push('--skills-dir', input.skillsDir);
+	return args;
 }
 
 export interface ServiceInstallInput {

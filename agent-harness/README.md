@@ -69,16 +69,40 @@ after 10 minutes and its next turn starts a fresh ACP session).
 
 ## Install
 
-Not yet published (publishing is a gated, 2FA-protected operator step). Until
-then, build a tarball and install it locally:
-
 ```bash
-npm run build
-npm pack
-npm install -g ./privos_ai-agent-harness-*.tgz
+npm install -g @privos_ai/agent-harness
+# or, without installing: npx @privos_ai/agent-harness pair <guideUrl>
 ```
 
-or run straight from the checkout with `npm link`.
+From a checkout: `npm run build && npm pack && npm install -g ./privos_ai-agent-harness-*.tgz`,
+or `npm link`. Publishing is a gated, 2FA-protected operator step.
+
+## Keep the bridge running
+
+The bridge is a long-lived process and the agent is only reachable while it
+is connected. Two layers keep it alive — the same split Buzz uses for its
+`buzz-acp` harness:
+
+- **Inside the process**: the bridge reconnects to the hub by itself (1 s →
+  60 s backoff) when the connection drops, and re-spawns an adapter process
+  that died. Nothing to configure.
+- **Outside the process**: something has to start it and bring it back after
+  a crash, logout or reboot. That is `service install` (systemd user unit,
+  `Restart=on-failure`, survives logout via `loginctl enable-linger`). On a
+  host without systemd, `start --detach` at least moves the bridge out of the
+  launching shell/exec session — but nothing restarts it afterwards.
+
+A hub-initiated stop is final and exits `0`: pairing rotated (`4401`), another
+bridge took over (`4409`), or the agent's runtime was switched. A service
+manager therefore does not restart the bridge against a revoked token; only
+an unexpected failure exits non-zero and triggers `Restart=on-failure`.
+
+**If you are an AI coding agent or harness pairing on the owner's behalf**
+(Claude Code, OpenClaw, Hermes, …): never run `start` as a background job of
+your own exec/tool session. Such a job is a child of your session — OpenClaw
+kills it after `tools.exec.timeoutSeconds` (30 min by default), Hermes ends it
+with the session. Run `pair <guideUrl> --install-service`, or `service
+install`, or at minimum `start --detach`.
 
 ## Commands
 
@@ -93,9 +117,33 @@ credential, and writes `~/.privos/agent-harness/<agentId>.json` (mode
 a clear "keys already retrieved" error pointing at *Rotate harness pairing*
 in Agent Settings.
 
+| Flag | Default | Notes |
+|---|---|---|
+| `--install-service` | off | after pairing, run `service install` in the same command (Linux) — the one-step path for an AI harness pairing itself |
+| `--adapter <id>` | the adapter chosen at agent creation | adapter for `--install-service` |
+| `--command "<bin> [args]"` | adapter default | required with `--install-service --adapter custom` |
+| `--isolation <level>` | `auto` | isolation for `--install-service` |
+| `--permissions <policy>` | `safe` | permission policy for `--install-service` |
+| `--insecure` | off | allow plain `http://` to a non-localhost hub |
+| `--no-skills` / `--skills-dir <dir>` | — | skip, or build from a local `privos-sandbox` checkout, the skills bundle |
+
+### `service install|uninstall|status`
+
+Writes and enables a systemd **user** unit (`~/.config/systemd/user/privos-agent-harness-<agentId>.service`)
+that runs `start` with the flags you pass (`--adapter`, `--command`,
+`--isolation`, `--permissions` (default `safe`), `--max-rooms`,
+`--idle-timeout`, `--workspace`, …), runs `loginctl enable-linger` so it
+survives logout (`--no-linger` to skip), and starts it (`--no-enable` to only
+write the unit). `--print` emits the unit on any OS so a macOS operator can
+adapt it to launchd. Adapter credentials go in
+`~/.config/privos-agent-harness-<agentId>.env` or come from the adapter CLI's
+own login. Logs: `journalctl --user -u privos-agent-harness-<agentId> -f`.
+
 ### `start`
 
-Connects the paired agent and starts serving turns.
+Connects the paired agent and starts serving turns in the foreground. Use
+`service install` (or `start --detach`) to keep it running — see *Keep the
+bridge running*.
 
 | Flag | Default | Notes |
 |---|---|---|
@@ -108,6 +156,7 @@ Connects the paired agent and starts serving turns.
 | `--container-image <image>` | `node:22-bookworm` | image for `--isolation container`; must have `python3` + the chosen adapter installed |
 | `--permissions <policy>` | `auto` | `auto \| safe \| deny` — see Security |
 | `--idle-timeout <seconds>` | `600` | reset on any agent activity |
+| `--detach` | off | re-launch the bridge in its own session with output in `<workspace>/bridge.log` and return; survives the launching shell/exec session, but nothing restarts it after a crash |
 | `--reset-session` | off | forget stored ACP session ids before starting |
 | `--insecure` | off | allow plain `http://`/`ws://` to a non-localhost hub |
 | `--verbose` | off | stream ACP updates to stderr |

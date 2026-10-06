@@ -40,7 +40,8 @@ import { seedAdapterState } from './adapter-state.js';
 import { resolveIsolation, runSelfTest, wrapCommand, type BaseIsolationLevel } from './isolation/index.js';
 import { redact } from './redact.js';
 import { BRIDGE_VERSION } from './version.js';
-import { installSystemdService, uninstallSystemdService, statusSystemdService, defaultUnitName } from './service-install.js';
+import { installSystemdService, uninstallSystemdService, statusSystemdService, defaultUnitName, buildServiceStartArgs } from './service-install.js';
+import { buildDetachedArgv, detachedLogPath, spawnDetached } from './start-detach.js';
 
 /** Pool cap 8 / idle reap 10 min — fixed by user decision (validation session 10), not a CLI knob. */
 const ROOM_IDLE_REAP_MS = 10 * 60 * 1000;
@@ -128,6 +129,8 @@ interface PairingGuide {
 	isolationAdvice: string;
 	keysUrl: string;
 	skillsUrl?: string;
+	/** Adapter chosen at agent creation (`claude|codex|cursor|goose|custom`); the default for `--install-service`. */
+	adapter?: string;
 	respondTo: AgentHarnessRespondTo;
 }
 
@@ -164,8 +167,59 @@ function parsePairingGuide(body: unknown): PairingGuide {
 		isolationAdvice: typeof b.isolationAdvice === 'string' ? b.isolationAdvice : '',
 		keysUrl: b.keysUrl,
 		skillsUrl: typeof b.skillsUrl === 'string' ? b.skillsUrl : undefined,
+		adapter: typeof b.adapter === 'string' ? b.adapter : undefined,
 		respondTo: respondTo === 'owner' || respondTo === 'agent-room-members' || respondTo === 'everyone' ? respondTo : 'owner',
 	};
+}
+
+/** `--adapter X`, or for `custom` (which has no default command) the `--command` placeholder the operator must fill in. */
+function adapterFlagsHint(adapter: string | undefined): string {
+	if (!adapter || !ADAPTER_IDS.includes(adapter as AdapterId)) return `--adapter <${ADAPTER_IDS.join('|')}>`;
+	return adapter === 'custom' ? '--adapter custom --command "<your ACP command>"' : `--adapter ${adapter}`;
+}
+
+interface PairOptions {
+	insecure?: boolean;
+	noSkills?: boolean;
+	skillsDir?: string;
+	/** Install + start the systemd user service right after pairing (Linux). */
+	installService?: boolean;
+	adapter?: string;
+	command?: string;
+	isolation?: string;
+	permissions?: string;
+}
+
+/**
+ * `pair --install-service`: hands the freshly paired bridge to systemd in the
+ * same command, so an operator -- or an AI harness pairing on the owner's
+ * behalf -- never has to background `start` inside its own session.
+ */
+function installServiceAfterPair(agentId: string, guide: PairingGuide, options: PairOptions): void {
+	const adapter = options.adapter ?? guide.adapter;
+	if (!adapter || !ADAPTER_IDS.includes(adapter as AdapterId)) {
+		fail(`--install-service needs a known adapter: pass --adapter <${ADAPTER_IDS.join('|')}> (the pairing guide named "${adapter ?? 'none'}").`);
+	}
+	if (adapter === 'custom' && !options.command) fail('--adapter custom has no default command: pass --command "<bin> [args]" together with --install-service.');
+	const isolation = options.isolation ?? 'auto';
+	if (!ISOLATION_FLAGS.includes(isolation as (typeof ISOLATION_FLAGS)[number])) fail(`--isolation must be one of: ${ISOLATION_FLAGS.join(', ')}`);
+	const permissions = options.permissions ?? 'safe';
+	if (!PERMISSION_POLICIES.includes(permissions as PermissionPolicy)) fail(`--permissions must be one of: ${PERMISSION_POLICIES.join(', ')}`);
+	const { command: adapterCommand } = resolveAdapterCommand(adapter as AdapterId, options.command);
+	const startArgs = buildServiceStartArgs({
+		agentId,
+		adapter,
+		isolation,
+		permissions,
+		maxRooms: 8,
+		idleTimeout: 600,
+		command: options.command,
+		insecure: options.insecure,
+		noSkills: options.noSkills,
+		skillsDir: options.skillsDir,
+	});
+	console.log('');
+	installSystemdService({ agentId, unitName: defaultUnitName(agentId), startArgs, adapterCommand, linger: true, enable: true, print: false });
 }
 
 function parsePairingKeys(body: unknown): PairingKeys {
@@ -177,14 +231,14 @@ function parsePairingKeys(body: unknown): PairingKeys {
 	return { agentId: b.agentId, hubUrl: b.hubUrl, botToken: b.botToken, agentRoomId: b.agentRoomId };
 }
 
-async function runPair(guideUrl: string, options: { insecure?: boolean; noSkills?: boolean; skillsDir?: string }): Promise<void> {
+async function runPair(guideUrl: string, options: PairOptions): Promise<void> {
 	assertSecureUrl(guideUrl, Boolean(options.insecure), 'guideUrl');
 
 	const guideResponse = await fetchJson(guideUrl).catch((error: unknown) => {
 		fail(`Could not reach the pairing guide: ${error instanceof Error ? error.message : String(error)}`);
 	});
 	if (guideResponse.status === 404 || guideResponse.status === 410 || isPairingErrorCode(guideResponse.body, 'pairing_expired')) {
-		fail('This pairing link has expired (links are valid for 5 minutes). Ask the owner to run "Rotate harness pairing" in Agent Settings and try again.');
+		fail('This pairing link has expired (links are valid for 10 minutes). Ask the owner to run "Rotate harness pairing" in Agent Settings and try again.');
 	}
 	if (guideResponse.status !== 200) fail(`Pairing guide request failed with HTTP ${guideResponse.status}.`);
 	const guide = parsePairingGuide(guideResponse.body);
@@ -232,7 +286,38 @@ async function runPair(guideUrl: string, options: { insecure?: boolean; noSkills
 		pairedAt: new Date().toISOString(),
 	});
 	console.log(`Paired. Config written to ${path} (mode 0600).`);
-	console.log(`Run: privos-agent-harness start --agent ${keys.agentId}`);
+	if (options.installService) {
+		installServiceAfterPair(keys.agentId, guide, options);
+		return;
+	}
+	const adapterFlags = adapterFlagsHint(options.adapter ?? guide.adapter);
+	console.log('Keep the bridge running as a service (recommended; Linux systemd):');
+	console.log(`  privos-agent-harness service install --agent ${keys.agentId} ${adapterFlags}`);
+	console.log('Without systemd, run it detached from this session:');
+	console.log(`  privos-agent-harness start --agent ${keys.agentId} ${adapterFlags} --detach`);
+	console.log('If you are an AI harness pairing on the owner\'s behalf: do not run "start" as a background job of your own exec session -- it dies with that session.');
+}
+
+/**
+ * `start --detach`: validates the paired agent, then re-launches this same
+ * command without `--detach` in its own session (output in
+ * `<workspace>/bridge.log`) and returns. See `start-detach.ts` for why.
+ */
+function runStartDetached(options: { agent?: string; workspace?: string }): void {
+	const agentId = resolveAgentId(options.agent);
+	loadConfig(agentId); // fail early, in the foreground, when the agent is not paired
+	const workspaceDir = options.workspace ?? defaultWorkspaceDir(agentId);
+	const logPath = detachedLogPath(workspaceDir);
+	const pid = spawnDetached({
+		nodePath: process.execPath,
+		scriptPath: process.argv[1] ?? '',
+		args: buildDetachedArgv(process.argv.slice(2)),
+		logPath,
+	});
+	console.log(`agent-harness ${BRIDGE_VERSION} started detached (pid ${pid}).`);
+	console.log(`  agent: ${agentId}`);
+	console.log(`  log:   ${logPath}`);
+	console.log('Nothing restarts a detached bridge after a crash or reboot -- prefer "service install" where systemd is available.');
 }
 
 // ---------------------------------------------------------------------------
@@ -483,7 +568,11 @@ async function runStart(options: StartOptions): Promise<void> {
 						? 'This agent is no longer a harness agent (runtime switch?). Nothing to connect to.'
 						: 'Connection rejected as unauthorized.';
 		console.error(`\n${message}`);
-		void pool.dispose().finally(() => process.exit(1));
+		// A hub-initiated stop is intentional and final (rotated token, another
+		// bridge took over, runtime switched): exit 0 so a supervisor with
+		// `Restart=on-failure` (service install) does not loop against a
+		// revoked token. Only unexpected failures exit non-zero.
+		void pool.dispose().finally(() => process.exit(0));
 	});
 
 	const shutdown = () => {
@@ -642,10 +731,22 @@ program
 	.option('--insecure', 'allow plain http:// / ws:// to a non-localhost host')
 	.option('--no-skills', 'skip installing the PrivOS skills bundle')
 	.option('--skills-dir <dir>', 'install skills from a local privos-sandbox checkout instead of the hub (for skill development)')
-	.action((guideUrl: string, opts: { insecure?: boolean; skills?: boolean; skillsDir?: string }) =>
-		runPair(guideUrl, { insecure: opts.insecure, noSkills: opts.skills === false, skillsDir: opts.skillsDir }).catch((e: unknown) =>
-			fail(String(e instanceof Error ? e.message : e)),
-		),
+	.option('--install-service', 'after pairing, install + start the bridge as a systemd user service (Linux) in the same command')
+	.option('--adapter <id>', `ACP adapter for --install-service: ${ADAPTER_IDS.join('|')} (default: the adapter chosen at agent creation)`)
+	.option('--command <cmd>', 'adapter spawn command for --install-service (required for --adapter custom)')
+	.option('--isolation <level>', `isolation level for --install-service: ${ISOLATION_FLAGS.join('|')}`, 'auto')
+	.option('--permissions <policy>', `permission policy for --install-service: ${PERMISSION_POLICIES.join('|')}`, 'safe')
+	.action((guideUrl: string, opts: Record<string, unknown>) =>
+		runPair(guideUrl, {
+			insecure: opts.insecure as boolean | undefined,
+			noSkills: opts.skills === false,
+			skillsDir: opts.skillsDir as string | undefined,
+			installService: opts.installService as boolean | undefined,
+			adapter: opts.adapter as string | undefined,
+			command: opts.command as string | undefined,
+			isolation: opts.isolation as string | undefined,
+			permissions: opts.permissions as string | undefined,
+		}).catch((e: unknown) => fail(String(e instanceof Error ? e.message : e))),
 	);
 
 program
@@ -659,6 +760,7 @@ program
 	.option('--container-image <image>', 'image for --isolation container (must have python3 + the chosen adapter installed)', DEFAULT_CONTAINER_IMAGE)
 	.option('--permissions <policy>', `permission policy: ${PERMISSION_POLICIES.join('|')}`, 'auto')
 	.option('--idle-timeout <seconds>', 'idle timeout in seconds', '600')
+	.option('--detach', 're-launch the bridge in its own session (output in <workspace>/bridge.log) and return; survives this shell/exec session, but nothing restarts it -- prefer "service install"')
 	.option('--reset-session', 'forget stored ACP session ids before starting')
 	.option('--insecure', 'allow plain http:// / ws:// to a non-localhost hub')
 	.option('--verbose', 'stream ACP updates to stderr')
@@ -671,6 +773,14 @@ program
 		if (!ISOLATION_FLAGS.includes(isolation as (typeof ISOLATION_FLAGS)[number])) fail(`--isolation must be one of: ${ISOLATION_FLAGS.join(', ')}`);
 		const permissions = opts.permissions as string;
 		if (!PERMISSION_POLICIES.includes(permissions as PermissionPolicy)) fail(`--permissions must be one of: ${PERMISSION_POLICIES.join(', ')}`);
+		if (opts.detach) {
+			try {
+				runStartDetached({ agent: opts.agent as string | undefined, workspace: opts.workspace as string | undefined });
+			} catch (e) {
+				fail(e instanceof Error ? e.message : String(e));
+			}
+			return;
+		}
 		return runStart({
 			agent: opts.agent as string | undefined,
 			adapter: adapter as AdapterId,
@@ -726,15 +836,20 @@ service
 		try {
 			const agentId = resolveAgentId(opts.agent as string | undefined);
 			const { command: adapterCommand } = resolveAdapterCommand(adapter as AdapterId, opts.command as string | undefined);
-			// Explicit start argv baked into the unit (defaults included, so the
-			// unit fully documents how the service runs).
-			const startArgs = ['start', '--agent', agentId, '--adapter', adapter, '--isolation', isolation, '--permissions', permissions, '--max-rooms', String(opts.maxRooms), '--idle-timeout', String(opts.idleTimeout)];
-			if (opts.command) startArgs.push('--command', String(opts.command));
-			if (opts.workspace) startArgs.push('--workspace', String(opts.workspace));
-			if (isolation === 'container') startArgs.push('--container-image', String(opts.containerImage));
-			if (opts.insecure) startArgs.push('--insecure');
-			if (opts.skills === false) startArgs.push('--no-skills');
-			if (opts.skillsDir) startArgs.push('--skills-dir', String(opts.skillsDir));
+			const startArgs = buildServiceStartArgs({
+				agentId,
+				adapter,
+				isolation,
+				permissions,
+				maxRooms: String(opts.maxRooms),
+				idleTimeout: String(opts.idleTimeout),
+				command: opts.command as string | undefined,
+				workspace: opts.workspace as string | undefined,
+				containerImage: String(opts.containerImage),
+				insecure: Boolean(opts.insecure),
+				noSkills: opts.skills === false,
+				skillsDir: opts.skillsDir as string | undefined,
+			});
 			installSystemdService({
 				agentId,
 				unitName: (opts.name as string | undefined) ?? defaultUnitName(agentId),
