@@ -61,10 +61,10 @@ function sha256(data: Buffer): string {
 // A well-formed fake bundle: 2 skills + skill-sdk, correctly digested.
 // ---------------------------------------------------------------------------
 
-function buildValidFixture(opts: { sandboxVersion?: string } = {}): Buffer {
-	const skillMd = Buffer.from('# fake-skill-a\ndoes nothing\n');
+function buildValidFixture(opts: { sandboxVersion?: string; skillMd?: string; skillBEdit?: string } = {}): Buffer {
+	const skillMd = Buffer.from(opts.skillMd ?? '# fake-skill-a\ndoes nothing\n');
 	const skillJs = Buffer.from('module.exports = () => {};\n');
-	const skillBEdit = Buffer.from('# agent-bot-edit\n');
+	const skillBEdit = Buffer.from(opts.skillBEdit ?? '# agent-bot-edit\n');
 	const sdk = Buffer.from('def hub():\n    return None\n');
 
 	const files = [
@@ -213,6 +213,49 @@ describe('installSkillsBundle — update semantics', () => {
 		setRoomBusy(workspaceDir, 'room-a', true);
 		const result = await installSkillsBundle(buildValidFixture({ sandboxVersion: '1.2.3' }), workspaceDir, { mode: 'update' });
 		expect(result.installed).toBe(false);
+	});
+});
+
+describe('installSkillsBundle — ${PRIVOS_SKILL_DIR} substitution', () => {
+	const withVariable = {
+		skillMd: 'Run: node ${PRIVOS_SKILL_DIR}/run.js and ${PRIVOS_SKILL_DIR}/run.js --help\n',
+		skillBEdit: 'node ${PRIVOS_SKILL_DIR}/bot.js list\n',
+	};
+
+	it('writes each skill\'s absolute directory into its SKILL.md and leaves other files byte-identical', async () => {
+		await installSkillsBundle(buildValidFixture(withVariable), workspaceDir, { mode: 'install' });
+		const skills = join(workspaceDir, '.privos', 'skills');
+		expect(readFileSync(join(skills, 'fake-skill-a', 'SKILL.md'), 'utf-8')).toBe(
+			`Run: node ${join(skills, 'fake-skill-a')}/run.js and ${join(skills, 'fake-skill-a')}/run.js --help\n`,
+		);
+		expect(readFileSync(join(skills, 'agent-bot-edit', 'SKILL.md'), 'utf-8')).toBe(
+			`node ${join(skills, 'agent-bot-edit')}/bot.js list\n`,
+		);
+		expect(readFileSync(join(skills, 'fake-skill-a', 'run.js'), 'utf-8')).toBe('module.exports = () => {};\n');
+	});
+
+	it('does not report a substituted SKILL.md as locally modified on the next update', async () => {
+		await installSkillsBundle(buildValidFixture({ ...withVariable, sandboxVersion: '1.2.3' }), workspaceDir, { mode: 'install' });
+		const updated = await installSkillsBundle(buildValidFixture({ ...withVariable, sandboxVersion: '1.3.0' }), workspaceDir, {
+			mode: 'update',
+		});
+		expect(updated.installed).toBe(true);
+	});
+
+	it('re-installs on the same sandboxVersion when the workspace has moved', async () => {
+		await installSkillsBundle(buildValidFixture(withVariable), workspaceDir, { mode: 'install' });
+		const moved = `${workspaceDir}-moved`;
+		const { renameSync } = await import('node:fs');
+		renameSync(workspaceDir, moved);
+		try {
+			const result = await installSkillsBundle(buildValidFixture(withVariable), moved, { mode: 'update' });
+			expect(result.installed).toBe(true);
+			expect(readFileSync(join(moved, '.privos', 'skills', 'fake-skill-a', 'SKILL.md'), 'utf-8')).toContain(
+				join(moved, '.privos', 'skills', 'fake-skill-a'),
+			);
+		} finally {
+			rmSync(moved, { recursive: true, force: true });
+		}
 	});
 });
 
