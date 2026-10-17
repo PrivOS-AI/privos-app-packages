@@ -45,6 +45,21 @@ const MAX_DOWNLOAD_BYTES = 10 * 1024 * 1024;
 const ALLOWED_PREFIXES = ['skills/', 'agent-room/skills/', 'skill-sdk/'];
 const EXECUTABLE_EXTENSIONS = new Set(['.js', '.sh', '.py']);
 const SKILLS_MANIFEST_STATE_FILE = '.skills-manifest.json';
+const SKILL_DIR_VARIABLE = '${PRIVOS_SKILL_DIR}';
+
+/**
+ * The bundle's SKILL.md files reference their scripts as `${PRIVOS_SKILL_DIR}/...`, which only the
+ * PrivOS Agent SDK substitutes. The coding agents this bridge drives (Claude Code, Codex, ...) do not,
+ * so the installer writes the skill's absolute directory in its place. Every isolation mode mounts
+ * `<workspace>/.privos` at that same absolute path, so the path holds inside the sandbox too.
+ */
+function substituteSkillDir(canonicalPath: string, data: Buffer, skillsRoot: string): Buffer {
+	const [name, ...rest] = canonicalPath.split('/');
+	if (rest.join('/') !== 'SKILL.md') return data;
+	const text = data.toString('utf-8');
+	if (!text.includes(SKILL_DIR_VARIABLE)) return data;
+	return Buffer.from(text.split(SKILL_DIR_VARIABLE).join(join(skillsRoot, name!)), 'utf-8');
+}
 
 export class HostileBundleError extends Error {}
 export class SkillsLocallyModifiedError extends Error {
@@ -252,6 +267,8 @@ function destinationFor(archivePath: string): { destRoot: 'skills' | 'skill-sdk'
 
 interface PrivosSkillsState {
 	sandboxVersion: string;
+	/** Absolute `.privos/skills` dir baked into each SKILL.md; a moved workspace re-installs. */
+	skillsRoot?: string;
 	/** canonicalPath ('skills/<name>/rel' or 'skill-sdk/rel') -> sha256, as last installed. */
 	files: Record<string, string>;
 }
@@ -342,7 +359,14 @@ export async function installSkillsBundle(
 	const { entries, manifest } = await parseAndVerifyBundle(buffer);
 	const previousState = readState(workspaceDir);
 
-	if (opts.mode === 'update' && previousState?.sandboxVersion === manifest.sandboxVersion && !opts.force) {
+	const privosDir = join(workspaceDir, '.privos');
+	const skillsRoot = join(privosDir, 'skills');
+	if (
+		opts.mode === 'update'
+		&& previousState?.sandboxVersion === manifest.sandboxVersion
+		&& previousState.skillsRoot === skillsRoot
+		&& !opts.force
+	) {
 		return { installed: false, sandboxVersion: manifest.sandboxVersion, skillNames: manifest.skills.map((s) => s.name) };
 	}
 
@@ -357,7 +381,9 @@ export async function installSkillsBundle(
 	const materialized = entries
 		.map((entry) => {
 			const dest = destinationFor(entry.archivePath);
-			return dest ? { ...dest, data: entry.data } : undefined;
+			if (!dest) return undefined;
+			const data = dest.destRoot === 'skills' ? substituteSkillDir(dest.canonicalPath, entry.data, skillsRoot) : entry.data;
+			return { ...dest, data };
 		})
 		.filter((v): v is { destRoot: 'skills' | 'skill-sdk'; canonicalPath: string; data: Buffer } => v !== undefined);
 
@@ -375,7 +401,6 @@ export async function installSkillsBundle(
 		if (conflicts.length > 0) throw new SkillsLocallyModifiedError(conflicts);
 	}
 
-	const privosDir = join(workspaceDir, '.privos');
 	mkdirSync(privosDir, { recursive: true });
 	const stagingDir = mkdtempSync(join(privosDir, '.skills-install-'));
 	try {
@@ -407,14 +432,12 @@ export async function installSkillsBundle(
 		rmSync(stagingDir, { recursive: true, force: true });
 	}
 
+	// Digests of the bytes written (after substitution), so `update` only flags real local edits.
 	const files: Record<string, string> = {};
-	for (const entry of entries) {
-		if (entry.archivePath === 'MANIFEST.json') continue;
-		const dest = destinationFor(entry.archivePath);
-		if (!dest) continue;
-		files[`${dest.destRoot}/${dest.canonicalPath}`] = createHash('sha256').update(entry.data).digest('hex');
+	for (const item of materialized) {
+		files[`${item.destRoot}/${item.canonicalPath}`] = createHash('sha256').update(item.data).digest('hex');
 	}
-	writeState(workspaceDir, { sandboxVersion: manifest.sandboxVersion, files });
+	writeState(workspaceDir, { sandboxVersion: manifest.sandboxVersion, skillsRoot, files });
 	ensureClaudeSkillsAlias(workspaceDir);
 	writeWorkspaceInstructions(workspaceDir);
 

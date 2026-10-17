@@ -191,6 +191,12 @@ process the instant it happens. The check works across separate CLI
 invocations: `start` marks a room busy/idle as turns come and go, and
 `update` reads that marker before touching disk.
 
+Platform skills reference their scripts as `${PRIVOS_SKILL_DIR}/...`, which
+the coding agents this bridge drives do not substitute. Install and update
+write each skill's absolute directory into its `SKILL.md` instead (after the
+bundle's sha256 check); every isolation mode mounts `.privos` at that same
+path. Moving the workspace re-installs on the next `skills update`.
+
 ## Adapters
 
 | Adapter | Command | System prompt | Auth | Steering |
