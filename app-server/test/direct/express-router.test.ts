@@ -177,6 +177,23 @@ describe('createDirectRouter', () => {
 		expect(allow.toLowerCase()).toContain('x-privos-mcp-dispatch-assertion');
 	});
 
+	it('allows any origin by default and a configured origin when set', async () => {
+		const defaultApp = express();
+		defaultApp.use(createDirectRouter({ descriptor, handler: async () => ({ tools: [] }) }));
+		const open = await request(defaultApp).options('/mcp').expect(204);
+		expect(open.headers['access-control-allow-origin']).toBe('*');
+		expect(open.headers['access-control-allow-credentials']).toBeUndefined();
+
+		const pinnedApp = express();
+		pinnedApp.use(
+			createDirectRouter({ descriptor, handler: async () => ({ tools: [] }), allowOrigin: 'https://hub.example.test' }),
+		);
+		const pinned = await request(pinnedApp).options('/mcp').expect(204);
+		expect(pinned.headers['access-control-allow-origin']).toBe('https://hub.example.test');
+		expect(pinned.headers.vary).toContain('Origin');
+		expect(pinned.headers['access-control-allow-credentials']).toBeUndefined();
+	});
+
 	it('verifies the exact v3 header before dispatch and propagates immutable runtime authorization', async () => {
 		const body = {
 			jsonrpc: '2.0',

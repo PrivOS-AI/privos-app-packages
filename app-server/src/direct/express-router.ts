@@ -57,6 +57,11 @@ export interface DirectRouterOptions {
 	 * and cannot be removed by omitting them here.
 	 */
 	corsAllowHeaders?: string[];
+	/**
+	 * Value of `Access-Control-Allow-Origin`. Default `*` (no credentials are
+	 * ever allowed). Set an exact origin to restrict browser callers.
+	 */
+	allowOrigin?: string;
 	/** Override credential extraction. Must not read body/arguments. */
 	extractCallerCredential?: CallerCredentialExtractor<{
 		headers: Request['headers'];
@@ -107,12 +112,14 @@ export function createDirectRouter(options: DirectRouterOptions): Router {
 	}
 	const manifestPath = options.manifestPath ?? '/.well-known/mcp/manifest.json';
 	const allowHeaders = mergeCorsHeaders(options.corsAllowHeaders);
+	const allowOrigin = options.allowOrigin ?? '*';
 	const maxBytes = runtime.getLimits().maxMessageBytes || DEFAULT_MAX_MESSAGE_BYTES;
 
 	const router = Router();
 
 	router.use((req: Request, res: Response, next: NextFunction) => {
-		res.setHeader('Access-Control-Allow-Origin', '*');
+		res.setHeader('Access-Control-Allow-Origin', allowOrigin);
+		if (allowOrigin !== '*') res.setHeader('Vary', 'Origin');
 		res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
 		res.setHeader('Access-Control-Allow-Headers', allowHeaders.join(', '));
 		if (req.method === 'OPTIONS') {
