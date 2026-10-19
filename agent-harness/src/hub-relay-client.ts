@@ -8,18 +8,18 @@
  * the socket itself is authenticated: malformed frames are logged and dropped,
  * never thrown.
  *
- * Uses Node's global `WebSocket` (undici-backed, stable since Node 22) instead
- * of the `ws` package. ponytail: the spec-compliant global WebSocket exposes
- * no raw ping/pong control frames to JS (neither sending nor receiving), so
- * unlike `app-server/src/relay/relay-client.ts` this client cannot proactively
- * detect a half-open dead socket — it relies on `close`/`error` events and the
- * hub's own liveness checks. Upgrade path: swap in the `ws` package's
- * `ping()`/`terminate()` idiom if a half-open socket becomes an operational
- * problem in practice.
+ * Uses the `ws` package rather than Node's global WebSocket because the
+ * global one hides ping/pong control frames and the upgrade's HTTP status.
+ * Liveness: the hub pings every 30s and terminates a socket that misses a
+ * pong, but a stalled path leaves THIS side holding a half-open socket it
+ * believes is connected. So every inbound frame (message, hub ping, pong to
+ * our own ping) refreshes `lastInboundAt`; the watchdog pings the hub and
+ * terminates + reconnects once nothing has arrived for `idleTimeoutMs`.
  */
 import http from 'node:http';
 import https from 'node:https';
 import { randomBytes } from 'node:crypto';
+import WebSocket from 'ws';
 import type { AgentHarnessRespondTo } from './config-store.js';
 
 export type AgentHarnessIsolationLevel = 'wrap' | 'wrap-shared-state' | 'container' | 'prompt' | 'none';
@@ -150,8 +150,8 @@ export interface HubRelayOptions {
 	handlers: HubRelayHandlers;
 	insecure?: boolean;
 	verbose?: boolean;
-	/** Injected for tests. */
-	WebSocketImpl?: typeof WebSocket;
+	/** Reconnect when no frame (message, ping or pong) arrives for this long. Default 75s (2.5 hub ping intervals). */
+	idleTimeoutMs?: number;
 }
 
 /** Reason strings the plan requires printed verbatim for each terminal close/rejection. */
@@ -163,20 +163,25 @@ export type TerminalReason =
 
 const BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 32_000, 60_000] as const;
 const SOCKET_LOSS_CANCEL_MS = 60_000;
+const DEFAULT_IDLE_TIMEOUT_MS = 75_000;
+const HANDSHAKE_TIMEOUT_MS = 15_000;
+
+function log(message: string): void {
+	process.stderr.write(`[agent-harness] ${new Date().toISOString()} ${message}\n`);
+}
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
 	return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 /**
- * Performs a raw HTTP upgrade probe so a 401/403 rejection can be detected
- * precisely — the spec-compliant global WebSocket surfaces every pre-open
- * failure (auth rejection, DNS failure, connection refused, ...) as the same
- * opaque `error` event with no status code. Uses Node's built-in `http`/`https`
- * modules only (no new dependency). Returns the HTTP status when the server
- * rejected the upgrade without switching protocols, or `null` when the
- * upgrade would succeed (or the probe itself failed for an unrelated reason —
- * the real WebSocket attempt below handles that case with its own backoff).
+ * Performs a raw HTTP upgrade probe for `doctor`, which reports the hub's
+ * verdict without opening a relay session. The relay connection itself reads
+ * the status from `ws`'s `unexpected-response` instead, so a reconnect costs
+ * one hit against the hub's per-token connect rate limit, not two. Returns
+ * the HTTP status when the server rejected the upgrade without switching
+ * protocols, or `null` when the upgrade would succeed (or the probe itself
+ * failed for an unrelated reason).
  */
 export function probeUpgradeStatus(wsUrl: string, headers: Record<string, string>): Promise<number | null> {
 	return new Promise((resolve) => {
@@ -218,8 +223,9 @@ export function probeUpgradeStatus(wsUrl: string, headers: Record<string, string
 
 export class HubRelayClient {
 	private readonly opts: HubRelayOptions;
-	private readonly WebSocketImpl: typeof WebSocket;
+	private readonly idleTimeoutMs: number;
 	private ws: WebSocket | undefined;
+	private lastInboundAt = 0;
 	private stopped = false;
 	private backoffIndex = 0;
 	private reconnectTimer: NodeJS.Timeout | undefined;
@@ -233,7 +239,7 @@ export class HubRelayClient {
 
 	constructor(opts: HubRelayOptions) {
 		this.opts = opts;
-		this.WebSocketImpl = opts.WebSocketImpl ?? WebSocket;
+		this.idleTimeoutMs = opts.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
 		this.whenTerminal = new Promise((resolve) => {
 			this.terminalResolve = resolve;
 		});
@@ -244,7 +250,7 @@ export class HubRelayClient {
 	}
 
 	isConnected(): boolean {
-		return this.ws !== undefined && this.ws.readyState === this.WebSocketImpl.OPEN;
+		return this.ws !== undefined && this.ws.readyState === WebSocket.OPEN;
 	}
 
 	/** Milliseconds since the socket last dropped, or `undefined` while connected. */
@@ -266,14 +272,16 @@ export class HubRelayClient {
 		return `${process.pid}-${this.idCounter++}`;
 	}
 
-	private scheduleReconnect(): void {
-		if (this.stopped || this.terminal) return;
+	/** Returns the backoff delay, or `undefined` when no reconnect will happen. */
+	private scheduleReconnect(): number | undefined {
+		if (this.stopped || this.terminal) return undefined;
 		const delay = BACKOFF_MS[Math.min(this.backoffIndex, BACKOFF_MS.length - 1)] ?? 60_000;
 		this.backoffIndex = Math.min(this.backoffIndex + 1, BACKOFF_MS.length - 1);
 		// Stays ref'd: an idle bridge has no other live handle once the socket
 		// drops, so an unref'd timer would let Node exit before reconnecting.
 		// stop() clears it, so a deliberate shutdown still exits.
 		this.reconnectTimer = setTimeout(() => void this.connectOnce(), delay);
+		return delay;
 	}
 
 	private setTerminal(reason: TerminalReason): void {
@@ -293,37 +301,47 @@ export class HubRelayClient {
 		}
 		const headers = { Authorization: `Bearer ${this.opts.botToken}` };
 
-		const probeStatus = await probeUpgradeStatus(wsUrl, headers);
-		if (probeStatus === 401) {
-			this.setTerminal({ kind: 'revoked' });
-			return;
-		}
-		if (probeStatus === 403) {
-			this.setTerminal({ kind: 'not_a_harness_agent' });
-			return;
-		}
-
-		// Node's global WebSocket accepts a non-standard `{ headers }` options object as the
-		// second constructor argument (undici extension); the WHATWG type only declares
-		// `protocols?: string | string[]` there, hence the narrow local cast.
-		const NodeWebSocketCtor = this.WebSocketImpl as unknown as new (url: string, options: { headers: Record<string, string> }) => WebSocket;
-		const ws = new NodeWebSocketCtor(wsUrl, { headers });
-		ws.binaryType = 'arraybuffer';
+		const ws = new WebSocket(wsUrl, { headers, handshakeTimeout: HANDSHAKE_TIMEOUT_MS });
 		this.ws = ws;
+		let lastError = '';
+		let watchdog: NodeJS.Timeout | undefined;
 
-		ws.addEventListener('open', () => {
+		ws.on('unexpected-response', (_req, res) => {
+			res.resume();
+			if (res.statusCode === 401) this.setTerminal({ kind: 'revoked' });
+			else if (res.statusCode === 403) this.setTerminal({ kind: 'not_a_harness_agent' });
+			lastError = `upgrade rejected with HTTP ${res.statusCode}`;
+			ws.terminate();
+		});
+		ws.on('open', () => {
 			this.backoffIndex = 0;
+			const offlineMs = this.disconnectedForMs();
+			log(`relay connected${offlineMs === undefined ? '' : ` after ${Math.round(offlineMs / 1000)}s offline`}`);
 			this.disconnectedSince = undefined;
+			this.lastInboundAt = Date.now();
+			watchdog = setInterval(() => this.checkIdle(ws), this.idleTimeoutMs / 5);
+			// The socket keeps the process alive; this timer must not.
+			watchdog.unref();
 			this.opts.handlers.onConnectionChange?.(true);
 			void this.sendHello();
 		});
-		ws.addEventListener('message', (event: MessageEvent) => {
-			void this.handleMessage(event.data);
+		const onInbound = (): void => {
+			this.lastInboundAt = Date.now();
+		};
+		ws.on('ping', onInbound);
+		ws.on('pong', onInbound);
+		ws.on('message', (data: WebSocket.RawData) => {
+			onInbound();
+			void this.handleMessage(data);
 		});
-		let ended = false;
-		const onEnded = (code: number, reason: string): void => {
-			if (ended) return;
-			ended = true;
+		// `ws` always follows `error` with `close`, including failed connects.
+		// Keep the first cause: terminate() after a rejected upgrade adds a generic abort error.
+		ws.on('error', (error: Error) => {
+			lastError ||= error.message;
+		});
+		ws.on('close', (code: number, reasonBuffer: Buffer) => {
+			const reason = reasonBuffer.toString('utf8');
+			clearInterval(watchdog);
 			if (this.ws === ws) this.ws = undefined;
 			if (this.disconnectedSince === undefined) this.disconnectedSince = Date.now();
 			this.opts.handlers.onConnectionChange?.(false);
@@ -332,20 +350,28 @@ export class HubRelayClient {
 			if (code === 4409) {
 				// The hub's reason is `replaced by <hostname>`; keep only the hostname.
 				this.setTerminal({ kind: 'replaced', hostname: reason.replace(/^replaced by /, '') || undefined });
-				return;
-			}
-			if (code === 4401) {
+			} else if (code === 4401) {
 				this.setTerminal({ kind: 'revoked' });
-				return;
 			}
-			this.scheduleReconnect();
-		};
-		ws.addEventListener('error', () => {
-			// Node's WebSocket fires no `close` when the connect itself fails (e.g.
-			// ECONNREFUSED while the hub is still down), so that error ends the attempt.
-			if (ws.readyState === ws.CONNECTING) onEnded(1006, '');
+			const delay = this.scheduleReconnect();
+			const detail = `code ${code}, reason "${reason}"${lastError ? `, error "${lastError}"` : ''}`;
+			log(`relay disconnected: ${detail}; ${delay === undefined ? 'not reconnecting' : `reconnecting in ${delay}ms`}`);
 		});
-		ws.addEventListener('close', (event: CloseEvent) => onEnded(event.code, event.reason));
+	}
+
+	/** Watchdog tick: terminate a socket that has gone silent, otherwise ping so a healthy idle hub answers with a pong. */
+	private checkIdle(ws: WebSocket): void {
+		const silentMs = Date.now() - this.lastInboundAt;
+		if (silentMs >= this.idleTimeoutMs) {
+			log(`relay received no data for ${Math.round(silentMs / 1000)}s; terminating the socket`);
+			ws.terminate();
+			return;
+		}
+		try {
+			ws.ping();
+		} catch {
+			/* socket already closing; `close` handles the reconnect */
+		}
 	}
 
 	private rejectAllPending(err: Error): void {
@@ -358,14 +384,14 @@ export class HubRelayClient {
 			const result = await this.request<HarnessHelloResult>('harness.hello', this.opts.hello);
 			this.helloResult = result;
 		} catch (error) {
-			process.stderr.write(`[agent-harness] harness.hello failed: ${error instanceof Error ? error.message : String(error)}\n`);
+			log(`harness.hello failed: ${error instanceof Error ? error.message : String(error)}`);
 			this.ws?.close();
 		}
 	}
 
 	private request<T>(method: string, params: unknown): Promise<T> {
 		return new Promise((resolve, reject) => {
-			if (!this.ws || this.ws.readyState !== this.WebSocketImpl.OPEN) {
+			if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
 				reject(new Error('not connected'));
 				return;
 			}
@@ -377,7 +403,7 @@ export class HubRelayClient {
 
 	/** Sends a bridge->hub notification (no reply expected). No-ops silently when not connected. */
 	notify(method: string, params: unknown): void {
-		if (!this.ws || this.ws.readyState !== this.WebSocketImpl.OPEN) return;
+		if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
 		try {
 			this.ws.send(JSON.stringify({ jsonrpc: '2.0', method, params }));
 		} catch {
@@ -388,7 +414,7 @@ export class HubRelayClient {
 	private async handleMessage(data: unknown): Promise<void> {
 		let text: string;
 		if (typeof data === 'string') text = data;
-		else if (data instanceof ArrayBuffer) text = Buffer.from(data).toString('utf8');
+		else if (Buffer.isBuffer(data)) text = data.toString('utf8');
 		else return;
 		let msg: unknown;
 		try {

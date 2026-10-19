@@ -84,8 +84,8 @@ is connected. Two layers keep it alive — the same split Buzz uses for its
 `buzz-acp` harness:
 
 - **Inside the process**: the bridge reconnects to the hub by itself (1 s →
-  60 s backoff) when the connection drops, and re-spawns an adapter process
-  that died. Nothing to configure.
+  60 s backoff) when the connection drops or goes silent, and re-spawns an
+  adapter process that died. Nothing to configure.
 - **Outside the process**: something has to start it and bring it back after
   a crash, logout or reboot. That is `service install` (systemd user unit,
   `Restart=on-failure`, survives logout via `loginctl enable-linger`). On a
@@ -166,6 +166,7 @@ bridge running*.
 | `--container-image <image>` | `node:22-bookworm` | image for `--isolation container`; must have `python3` + the chosen adapter installed |
 | `--permissions <policy>` | `auto` | `auto \| safe \| deny` — see Security |
 | `--idle-timeout <seconds>` | `600` | reset on any agent activity |
+| `--relay-idle-timeout <seconds>` | `75` | reconnect when nothing (message, ping or pong) arrives from the hub for this long |
 | `--detach` | off | re-launch the bridge in its own session with output in `<workspace>/bridge.log` and return; survives the launching shell/exec session, but nothing restarts it after a crash |
 | `--reset-session` | off | forget stored ACP session ids before starting |
 | `--insecure` | off | allow plain `http://`/`ws://` to a non-localhost hub |
@@ -229,7 +230,10 @@ back to cancel-and-remerge on the hub side.
   advertises the `loadSession` capability; replay notifications from
   `session/load` are gated so they never appear as `turn.chunk` output.
 - Reconnects with exponential backoff (1s → 60s) on any transient
-  disconnect; a close code of 4409 (replaced by another bridge) or 4401
+  disconnect, and logs each disconnect (ISO timestamp, close code, reason,
+  backoff delay) and reconnect to stderr. The hub pings every 30s and the
+  bridge pings back; a half-open socket where nothing arrives for
+  `--relay-idle-timeout` is terminated and reconnected. A close code of 4409 (replaced by another bridge) or 4401
   (token revoked), or an HTTP 401/403 at the WebSocket upgrade, is terminal —
   the process prints why and exits.
 

@@ -1,8 +1,6 @@
 /**
- * Fakes the HUB side of the relay for tests. Node's global `WebSocket` (used
- * by hub-relay-client.ts) has no server counterpart, so this fixture uses the
- * `ws` package (a devDependency ONLY — `hub-relay-client.ts` itself never
- * imports `ws`) to stand in for the hub in `hub-relay-client.test.ts` and
+ * Fakes the HUB side of the relay for tests with the `ws` package's server,
+ * standing in for the hub in `hub-relay-client.test.ts` and
  * `integration.test.ts`.
  */
 import http from 'node:http';
@@ -23,12 +21,10 @@ export interface JsonRpcFrame {
 export class FakeHub {
 	private readonly httpServer = http.createServer();
 	private readonly wss = new WebSocketServer({ noServer: true });
-	/**
-	 * Every accepted upgrade, INCLUDING the client's own `probeUpgradeStatus`
-	 * preflight (which completes a real 101 handshake, sends nothing, and is
-	 * destroyed immediately). Only used to sanity-check probe accounting.
-	 */
+	/** Every accepted upgrade. */
 	readonly sockets: ServerWebSocket[] = [];
+	/** Every upgrade request, accepted or rejected -- what the hub's per-token connect rate limit counts. */
+	upgradeAttempts = 0;
 	/** Connections that actually spoke JSON-RPC (sent `harness.hello`) — what tests should assert on. */
 	readonly readyConnections: ServerWebSocket[] = [];
 	readonly notifications: JsonRpcFrame[] = [];
@@ -42,6 +38,7 @@ export class FakeHub {
 
 	async listen(): Promise<string> {
 		this.httpServer.on('upgrade', (req, socket, head) => {
+			this.upgradeAttempts++;
 			if (req.url !== RELAY_PATH || req.headers.authorization !== `Bearer ${this.expectedToken}`) {
 				socket.write(`HTTP/1.1 401 Unauthorized\r\n\r\n`);
 				socket.destroy();
