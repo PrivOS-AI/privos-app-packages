@@ -40,8 +40,9 @@ export interface VerifiedActor {
 	 */
 	callerApp?: string;
 	/**
-	 * True when the call was made by another app's server. It does NOT compare rooms. Present on
-	 * App Cluster dispatch only when the manifest declares `capabilities.cross_room`.
+	 * True when another app's server made the call and its bot cannot access the target room (not
+	 * a member of a private room, or no room named). Present on App Cluster dispatch only when the
+	 * manifest declares `capabilities.cross_room`.
 	 */
 	crossRoom?: boolean;
 	/**
