@@ -378,11 +378,15 @@ function withManagedDispatchActor(
 		sub: actor.subject,
 		...(actor.username !== undefined ? { preferred_username: actor.username } : {}),
 		...(actor.roomId !== undefined ? { rid: actor.roomId } : {}),
+		...(actor.callerApp !== undefined ? { caller_app: actor.callerApp } : {}),
+		...(actor.crossRoom !== undefined ? { cross_room: actor.crossRoom } : {}),
 	});
 	const verifiedActor: VerifiedActor = Object.freeze({
 		userId: actor.subject,
 		...(actor.username !== undefined ? { username: actor.username } : {}),
 		...(actor.roomId !== undefined ? { roomId: actor.roomId } : {}),
+		...(actor.callerApp !== undefined ? { callerApp: actor.callerApp } : {}),
+		...(actor.crossRoom !== undefined ? { crossRoom: actor.crossRoom } : {}),
 		claims,
 		provenance: 'dispatch-assertion',
 	});

@@ -298,6 +298,22 @@ describe('cluster-routed App Library dispatch assertions', () => {
 		expect(Object.isFrozen(verified.actor)).toBe(true);
 	});
 
+	it('accepts callerApp and crossRoom on an other-app call', () => {
+		const { compact, context } = clusterDispatchV3({
+			payload: {
+				authorizationContext: 'room',
+				roomId: 'room-1',
+				authorizationBindingId: 'binding-1',
+				bindingReceiptHash: 'F'.repeat(43),
+				bindingEpoch: 1,
+				actor: { callerApp: 'ai.privos.vibe-flow', crossRoom: true, roomId: 'room-1', subject: 'bot-1' },
+			},
+		});
+
+		const verified = verifyClusterDispatchAssertionV3({ compact, body: CLUSTER_V3_BODY, context, now: CLUSTER_V3_NOW });
+		expect(verified.actor).toEqual({ subject: 'bot-1', roomId: 'room-1', callerApp: 'ai.privos.vibe-flow', crossRoom: true });
+	});
+
 	it('keeps actor absence a normal verified assertion state', () => {
 		const { compact, context } = clusterDispatchV3();
 
@@ -312,6 +328,9 @@ describe('cluster-routed App Library dispatch assertions', () => {
 		['a non-string subject', { subject: 42 }],
 		['a non-string username', { subject: 'user-1', username: 7 }],
 		['an unknown inner key', { subject: 'user-1', privileged: true }],
+		['an empty callerApp', { subject: 'bot-1', callerApp: '' }],
+		['a non-string callerApp', { subject: 'bot-1', callerApp: 7 }],
+		['crossRoom other than true', { subject: 'bot-1', crossRoom: false }],
 		['a bare string', 'user-1'],
 		['null', null],
 	])('refuses a signed actor with %s', (_case, actor) => {
