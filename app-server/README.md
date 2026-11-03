@@ -326,32 +326,52 @@ if (!actor.roomRoles?.includes('owner') && !actor.workspaceRoles?.includes('admi
 
 The claims describe only the caller, are signed by the Hub, and live for the
 token's short TTL (~5 min) — re-fetch a fresh token (e.g. via `mcpapp.context.get`)
-so a role change is reflected. They are never derived from anything the client
-sends, so an app can trust them but can never widen them.
+so a role change is reflected. They are not
+derived from anything the client sends about itself, so an app can trust them but can never
+widen them. One caveat: for a call made by another app's server, the room (`rid`) is chosen
+by the caller. It proves only that your app is bound in that room, not that the caller is a
+member of it.
 
 #### Sharing tools with other apps and agents
 
-By default a tool is callable only by users in a room where the app is installed. To let other
-apps and agents call a tool, list it under the top-level `toolAccess` of the manifest:
+A tool not listed in `toolAccess` is callable by humans in rooms where the app is installed
+and by the app's own server. Agents and other apps get a tool only when it is `shared` AND the
+workspace enforces shared-tool rules; until then other callers may still reach it, so
+authorize inside the tool. To mark a tool as shared, list it under the top-level `toolAccess`
+of the manifest:
 
 ```json
 { "tools": [{ "name": "read_page" }], "toolAccess": { "read_page": "shared" } }
 ```
 
 Every key must be a `tools[]` name (max 200); the only value is `"shared"`. To learn who is
-calling, also declare the dispatch claims `caller_app` and `cross_room`. The Hub then adds them
-to the signed user token and the SDK lifts them onto the actor:
+calling, the Hub signs these claims and the SDK lifts them onto the actor. Declare them under
+`capabilities`:
 
-- `actor.callerApp` — the calling app's id.
-- `actor.crossRoom` — `true` when the call comes from a different room than the one targeted.
+```json
+{ "capabilities": { "caller_app": true, "cross_room": true } }
+```
 
-For a cross-room call, authorize by your own configuration for `actor.callerApp`, never by
-`actor.roomId` alone:
+On the user-token path the Hub always sends `caller_app` and `ptype`, declared or not. On App
+Cluster dispatch, `caller_app` and `cross_room` are sent only when declared.
+
+- `actor.callerApp` - the calling app's id, when another app's server made the call.
+- `actor.crossRoom` - `true` when the call is made by another app's server. It is not a room
+  comparison.
+- `actor.principalType === 'bot'` - the caller is automation (an agent or another app), never
+  a person. Absent means "not marked", not "human". It is always undefined on App Cluster
+  dispatch, whose assertion has no principal type.
+
+Deny by default. Never authorize a bot caller on `actor.roomId` alone: for another app's call
+the room is chosen by the caller and proves only that your app is bound there.
 
 ```ts
 const actor = assertActorAvailable(context, 'enforce');
-if (actor.crossRoom && !(actor.callerApp && myAllowedCallers.has(actor.callerApp))) {
+if (actor.callerApp && !myAllowedCallers.has(actor.callerApp)) {
   throw new Error('Caller app not allowed');
+}
+if (actor.principalType === 'bot' && isWrite && !myBotWriteAllowList.has(actor.userId)) {
+  throw new Error('Automation callers may not write');
 }
 ```
 

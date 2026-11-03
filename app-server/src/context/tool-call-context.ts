@@ -34,15 +34,22 @@ export interface VerifiedActor {
 	 */
 	workspaceRoles?: string[];
 	/**
-	 * Another app's id, from the Hub-signed `caller_app` claim. Present only when this app's
-	 * manifest declares the `caller_app` dispatch claim and the call came from another app.
+	 * Another app's id, from the Hub-signed `caller_app` claim, when the call came from another
+	 * app's server. On the user-token path the Hub always sends it; on App Cluster dispatch only
+	 * when the manifest declares `capabilities.caller_app`.
 	 */
 	callerApp?: string;
 	/**
-	 * True when the Hub-signed `cross_room` claim marks the call as coming from a different room
-	 * than the one it targets. Present only when the manifest declares the `cross_room` claim.
+	 * True when the call was made by another app's server. It does NOT compare rooms. Present on
+	 * App Cluster dispatch only when the manifest declares `capabilities.cross_room`.
 	 */
 	crossRoom?: boolean;
+	/**
+	 * `'bot'` when the Hub-signed user-token `ptype` claim marks the caller as automation (an
+	 * agent or another app's server), never a person. Absent means "not marked", not "human".
+	 * Always undefined on App Cluster dispatch, whose assertion carries no principal type.
+	 */
+	principalType?: 'bot';
 	/** Raw claims subset safe for app policy (no token string). */
 	claims: Readonly<Record<string, unknown>>;
 	/** How this actor was established — see {@link VerifiedActorProvenance}. */
