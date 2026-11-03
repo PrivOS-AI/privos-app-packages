@@ -130,4 +130,16 @@ describe('verifyUserToken', () => {
 			expect(bad.actor.crossRoom).toBeUndefined();
 		}
 	});
+
+	it('lifts ptype=bot onto the actor and ignores absent or malformed values', async () => {
+		const { jwks, sign, aud } = await mintTestKeys();
+		const opts = { jwksUrl: 'http://unused.invalid/jwks', audience: aud, localJwks: jwks };
+		const bot = await verifyUserToken(await sign({ sub: 'u', ptype: 'bot' }), opts);
+		expect(bot.ok && bot.actor.principalType).toBe('bot');
+		for (const extra of [{}, { ptype: 'human' }, { ptype: true }, { ptype: ['bot'] }]) {
+			const r = await verifyUserToken(await sign({ sub: 'u', ...extra }), opts);
+			expect(r.ok).toBe(true);
+			if (r.ok) expect(r.actor.principalType).toBeUndefined();
+		}
+	});
 });

@@ -110,6 +110,7 @@ function actorFromPayload(payload: JWTPayload): VerifiedActor {
 	const workspaceRoles = asStringArray(payload.workspace_roles);
 	const callerApp = typeof payload.caller_app === 'string' && payload.caller_app ? payload.caller_app : undefined;
 	const crossRoom = typeof payload.cross_room === 'boolean' ? payload.cross_room : undefined;
+	const principalType = payload.ptype === 'bot' ? ('bot' as const) : undefined;
 	return Object.freeze({
 		userId: payload.sub,
 		...(username !== undefined ? { username } : {}),
@@ -118,6 +119,7 @@ function actorFromPayload(payload: JWTPayload): VerifiedActor {
 		...(workspaceRoles !== undefined ? { workspaceRoles } : {}),
 		...(callerApp !== undefined ? { callerApp } : {}),
 		...(crossRoom !== undefined ? { crossRoom } : {}),
+		...(principalType !== undefined ? { principalType } : {}),
 		claims: Object.freeze({ ...payload }) as Readonly<Record<string, unknown>>,
 		provenance: 'user-token',
 	});
