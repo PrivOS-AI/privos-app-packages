@@ -79,7 +79,7 @@ export type VerifiedDispatchActor = Readonly<{
 	roomId?: string;
 	/** Other-app call: the calling app's appId (Hub signs it only for an app declaring `capabilities.caller_app`). */
 	callerApp?: string;
-	/** Other-app call (Hub signs it only for an app declaring `capabilities.cross_room`). */
+	/** Other-app call from outside the room (Hub signs it only for an app declaring `capabilities.cross_room`). */
 	crossRoom?: true;
 }>;
 
