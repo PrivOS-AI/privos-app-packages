@@ -382,6 +382,7 @@ interface StartOptions {
 	containerImage: string;
 	permissions: PermissionPolicy;
 	idleTimeout: string;
+	relayIdleTimeout: string;
 	resetSession?: boolean;
 	insecure?: boolean;
 	verbose?: boolean;
@@ -428,6 +429,8 @@ async function runStart(options: StartOptions): Promise<void> {
 	if (!Number.isFinite(maxRooms) || maxRooms < 1) fail('--max-rooms must be a positive integer.');
 	const idleTimeoutMs = Number(options.idleTimeout) * 1000;
 	if (!Number.isFinite(idleTimeoutMs) || idleTimeoutMs <= 0) fail('--idle-timeout must be a positive number of seconds.');
+	const relayIdleTimeoutMs = Number(options.relayIdleTimeout) * 1000;
+	if (!Number.isFinite(relayIdleTimeoutMs) || relayIdleTimeoutMs <= 0) fail('--relay-idle-timeout must be a positive number of seconds.');
 
 	console.log(`agent-harness ${BRIDGE_VERSION} starting`);
 	console.log(`  agent:       ${agentId}`);
@@ -546,6 +549,7 @@ async function runStart(options: StartOptions): Promise<void> {
 		botToken: config.botToken,
 		insecure: options.insecure,
 		verbose: options.verbose,
+		idleTimeoutMs: relayIdleTimeoutMs,
 		hello: {
 			adapter: options.adapter,
 			bridgeVersion: BRIDGE_VERSION,
@@ -796,6 +800,7 @@ program
 	.option('--container-image <image>', 'image for --isolation container (must have python3 + the chosen adapter installed)', DEFAULT_CONTAINER_IMAGE)
 	.option('--permissions <policy>', `permission policy: ${PERMISSION_POLICIES.join('|')}`, 'auto')
 	.option('--idle-timeout <seconds>', 'idle timeout in seconds', '600')
+	.option('--relay-idle-timeout <seconds>', 'reconnect to the hub when nothing (not even a ping) arrives for this long', '75')
 	.option('--detach', 're-launch the bridge in its own session (output in <workspace>/bridge.log) and return; survives this shell/exec session, but nothing restarts it -- prefer "service install"')
 	.option('--reset-session', 'forget stored ACP session ids before starting')
 	.option('--insecure', 'allow plain http:// / ws:// to a non-localhost hub')
@@ -827,6 +832,7 @@ program
 			containerImage: opts.containerImage as string,
 			permissions: permissions as PermissionPolicy,
 			idleTimeout: opts.idleTimeout as string,
+			relayIdleTimeout: opts.relayIdleTimeout as string,
 			resetSession: opts.resetSession as boolean | undefined,
 			insecure: opts.insecure as boolean | undefined,
 			verbose: opts.verbose as boolean | undefined,

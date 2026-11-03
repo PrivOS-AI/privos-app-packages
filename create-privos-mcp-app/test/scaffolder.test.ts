@@ -89,7 +89,7 @@ describe('scaffoldApp', () => {
 		expect(pkg.devDependencies['@privos_ai/app-react']).toBe('^0.8.0');
 		expect(pkg.devDependencies.vite).toBe('^5.0.0');
 		expect(pkg.devDependencies.vitest).toBe('^2.1.9');
-		expect(pkg.engines.node).toBe('>=22');
+		expect(pkg.engines.node).toBe('>=22.23.4 <23');
 		expect(pkg.scripts.test).toBe('vitest run');
 		expect(pkg.scripts.typecheck).toBeDefined();
 		expect(pkg.scripts.pair).toContain('scripts/pair.ts');
@@ -197,7 +197,9 @@ describe('scaffoldApp', () => {
 		const dockerfile = fs.readFileSync(path.join(targetDir, 'Dockerfile'), 'utf-8');
 		const manifest = readJson<{ port: number }>(path.join(targetDir, 'privos-app.json'));
 
-		expect(dockerfile).toContain('FROM node:22-alpine');
+		expect(dockerfile).toMatch(/^FROM node:22\.23\.4-alpine3\.23@sha256:[0-9a-f]{64} AS build$/m);
+		expect(dockerfile).not.toMatch(/FROM node:22-alpine/);
+		expect(dockerfile).toContain('CVE-2026-111497 minimum');
 		expect(dockerfile).not.toMatch(/node:20/);
 		expect(dockerfile).toContain('npm ci');
 		expect(dockerfile).toContain('USER node');
@@ -484,9 +486,12 @@ describe('template ignore file', () => {
 
 describe('nodeVersionWarning', () => {
 	it('warns below Node 22 and stays quiet from 22 on', () => {
-		expect(nodeVersionWarning('v20.11.1')).toMatch(/older than 22/);
-		expect(nodeVersionWarning('18.0.0')).toMatch(/older than 22/);
-		expect(nodeVersionWarning('v22.0.0')).toBeUndefined();
+		expect(nodeVersionWarning('v20.11.1')).toMatch(/older than 22\.23\.4/);
+		expect(nodeVersionWarning('18.0.0')).toMatch(/older than 22\.23\.4/);
+		expect(nodeVersionWarning('v22.0.0')).toMatch(/older than 22\.23\.4/);
+		expect(nodeVersionWarning('v22.23.3')).toMatch(/older than 22\.23\.4/);
+		expect(nodeVersionWarning('v22.23.4')).toBeUndefined();
+		expect(nodeVersionWarning('v22.23.10')).toBeUndefined();
 		expect(nodeVersionWarning('v24.1.0')).toBeUndefined();
 	});
 });

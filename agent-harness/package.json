@@ -38,6 +38,7 @@
     "axios": "^1.7.0",
     "commander": "^14.0.0",
     "tar": "^7.4.0",
+    "ws": "^8.18.0",
     "zod": "^4.0.0"
   },
   "devDependencies": {
@@ -45,8 +46,7 @@
     "@types/ws": "^8.5.0",
     "tsup": "^8.0.0",
     "typescript": "^5.9.3",
-    "vitest": "4.1.11",
-    "ws": "^8.18.0"
+    "vitest": "4.1.11"
   },
   "engines": {
     "node": ">=22.0.0"

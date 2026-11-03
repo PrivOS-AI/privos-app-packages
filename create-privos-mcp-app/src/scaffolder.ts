@@ -210,13 +210,17 @@ export async function scaffoldApp(appName: string, options: ScaffoldOptions = {}
 	return { appName, appId, idIsPlaceholder, template: template as ScaffoldTemplate, targetDir, git };
 }
 
-const MINIMUM_NODE_MAJOR = 22;
+// Lowest Node 22 without the CVE-2026-111497 Brotli decoder bug; the generated app's engines.node starts here.
+const MINIMUM_NODE = [22, 23, 4];
 
 /** One warning line when the running Node is older than the generated app supports. */
 export function nodeVersionWarning(nodeVersion: string): string | undefined {
-	const major = Number(nodeVersion.replace(/^v/, '').split('.')[0]);
-	return major < MINIMUM_NODE_MAJOR
-		? `Node ${nodeVersion} is older than ${MINIMUM_NODE_MAJOR}. The generated app needs Node ${MINIMUM_NODE_MAJOR} or newer (engines.node >=${MINIMUM_NODE_MAJOR}); upgrade before you run npm install.`
+	const v = nodeVersion.replace(/^v/, '').split('.').map(Number);
+	const index = MINIMUM_NODE.findIndex((part, i) => (v[i] ?? 0) !== part);
+	const older = index !== -1 && (v[index] ?? 0) < MINIMUM_NODE[index];
+	const minimum = MINIMUM_NODE.join('.');
+	return older
+		? `Node ${nodeVersion} is older than ${minimum}. The generated app needs Node ${minimum} or newer (engines.node >=${minimum} <23); upgrade before you run npm install.`
 		: undefined;
 }
 

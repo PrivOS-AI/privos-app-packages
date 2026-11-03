@@ -1,0 +1,18 @@
+name: node-pins
+
+# CVE-2026-111497: every Dockerfile FROM is pinned by digest on a patched Node, and workflow
+# node-version values stay on the patched line.
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  node-pins:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/check-node-pins.sh

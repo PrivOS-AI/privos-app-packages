@@ -2,7 +2,7 @@
 
 CLI scaffolder for [PrivOS](https://privos.io) MCP apps. It generates a TypeScript app that runs in your own workspace over Relay, and that passes the checks the PrivOS marketplace applies when you publish it.
 
-Requires Node 22 or newer. The CLI warns on an older Node, and the generated app declares `engines.node >=22`.
+Requires Node 22.23.4 or newer (CVE-2026-111497). The CLI warns on an older Node, and the generated app declares `engines.node >=22.23.4 <23`.
 
 ## Usage
 
@@ -32,7 +32,7 @@ Publishing archives the repository root, so an app has to be its own repository.
 ```
 my-app/
 ├── privos-app.json         # schema version 3 manifest: identity, permissions, data policy, tools
-├── Dockerfile              # node:22-alpine, non-root, no npm at runtime, health check on /health
+├── Dockerfile              # node:22.23.4-alpine3.23 pinned by digest, Node guard, non-root, no npm at runtime, health check on /health
 ├── package.json
 ├── gitignore → .gitignore  # secrets, identity file, build output; never the lockfile
 ├── .gitattributes          # agent folders and instruction files stay out of the publish archive

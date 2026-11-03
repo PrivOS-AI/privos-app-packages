@@ -176,6 +176,104 @@ describe('HubRelayClient', () => {
 		await vi.waitFor(() => expect(onConnectionChange).toHaveBeenCalledTimes(2), { timeout: 3_000, interval: 50 });
 		expect(onConnectionChange).toHaveBeenCalledWith(false);
 	});
+
+	describe('liveness and reconnect logging', () => {
+		let stderr: string[];
+
+		beforeEach(() => {
+			stderr = [];
+			vi.spyOn(process.stderr, 'write').mockImplementation((chunk: string | Uint8Array) => {
+				stderr.push(String(chunk));
+				return true;
+			});
+		});
+		afterEach(() => {
+			vi.restoreAllMocks();
+		});
+
+		it('terminates a silent socket (TCP open, nothing arriving) and reconnects', async () => {
+			client = new HubRelayClient({ hubUrl, botToken: GOOD_TOKEN, hello: helloParams(), handlers: fakeHandlers(), idleTimeoutMs: 500 });
+			client.start();
+			await vi.waitFor(() => expect(hub.readyConnections).toHaveLength(1));
+
+			// Stop reading on the hub side: no pongs, no frames, but the TCP socket stays ESTABLISHED.
+			const stalled = hub.readyConnections[0]!;
+			(stalled as unknown as { _socket: import('node:net').Socket })._socket.pause();
+			const stalledAt = Date.now();
+
+			await vi.waitFor(() => expect(hub.readyConnections).toHaveLength(2), { timeout: 3_000, interval: 20 });
+			// idleTimeout + one watchdog tick + the first 1s backoff step.
+			expect(Date.now() - stalledAt).toBeLessThan(500 + 100 + 1_000 + 500);
+			expect(stderr.join('')).toMatch(/relay received no data for \d+s; terminating the socket/);
+			stalled.terminate();
+		});
+
+		it('a healthy idle hub keeps the connection up by answering our pings', async () => {
+			client = new HubRelayClient({ hubUrl, botToken: GOOD_TOKEN, hello: helloParams(), handlers: fakeHandlers(), idleTimeoutMs: 300 });
+			client.start();
+			await vi.waitFor(() => expect(hub.readyConnections).toHaveLength(1));
+
+			await new Promise((resolve) => setTimeout(resolve, 1_200));
+			expect(hub.readyConnections).toHaveLength(1);
+			expect(client.isConnected()).toBe(true);
+		});
+
+		it('hub pings alone count as inbound data', async () => {
+			client = new HubRelayClient({ hubUrl, botToken: GOOD_TOKEN, hello: helloParams(), handlers: fakeHandlers(), idleTimeoutMs: 300 });
+			client.start();
+			await vi.waitFor(() => expect(hub.readyConnections).toHaveLength(1));
+			// Silence our own pings so only the hub's pings can keep the socket alive.
+			(client as unknown as { ws: { ping: () => void } }).ws.ping = () => undefined;
+
+			const hubPinger = setInterval(() => hub.readyConnections[0]!.ping(), 60);
+			await new Promise((resolve) => setTimeout(resolve, 1_200));
+			expect(hub.readyConnections).toHaveLength(1);
+
+			clearInterval(hubPinger);
+			await vi.waitFor(() => expect(hub.readyConnections).toHaveLength(2), { timeout: 3_000, interval: 20 });
+		});
+
+		it('spends exactly one upgrade per connect attempt (no separate probe)', async () => {
+			client = new HubRelayClient({ hubUrl, botToken: GOOD_TOKEN, hello: helloParams(), handlers: fakeHandlers() });
+			client.start();
+			await vi.waitFor(() => expect(hub.readyConnections).toHaveLength(1));
+			expect(hub.upgradeAttempts).toBe(1);
+
+			hub.readyConnections[0]!.close(1001, 'going away');
+			await vi.waitFor(() => expect(hub.readyConnections).toHaveLength(2), { timeout: 3_000, interval: 50 });
+			expect(hub.upgradeAttempts).toBe(2);
+		});
+
+		it('retries an HTTP 429 at the upgrade with backoff instead of treating it as terminal', async () => {
+			hub.rejectStatus = 429;
+			client = new HubRelayClient({ hubUrl, botToken: GOOD_TOKEN, hello: helloParams(), handlers: fakeHandlers() });
+			client.start();
+			await vi.waitFor(() => expect(stderr.join('')).toMatch(/upgrade rejected with HTTP 429"; reconnecting in 1000ms/));
+			expect(hub.upgradeAttempts).toBe(1);
+
+			hub.rejectStatus = undefined;
+			await vi.waitFor(() => expect(hub.readyConnections).toHaveLength(1), { timeout: 3_000, interval: 50 });
+			expect(hub.upgradeAttempts).toBe(2);
+		});
+
+		it('logs every disconnect and reconnect with an ISO timestamp, close code, reason and backoff delay', async () => {
+			client = new HubRelayClient({ hubUrl, botToken: GOOD_TOKEN, hello: helloParams(), handlers: fakeHandlers() });
+			client.start();
+			await vi.waitFor(() => expect(hub.readyConnections).toHaveLength(1));
+
+			hub.readyConnections[0]!.close(1001, 'going away');
+			await vi.waitFor(() => expect(hub.readyConnections).toHaveLength(2), { timeout: 3_000, interval: 50 });
+
+			const iso = '\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z';
+			// The previous test's client may still log its own late close first.
+			const lines = stderr.join('').trim().split('\n').slice(-3);
+			expect(lines).toEqual([
+				expect.stringMatching(new RegExp(`^\\[agent-harness\\] ${iso} relay connected$`)),
+				expect.stringMatching(new RegExp(`^\\[agent-harness\\] ${iso} relay disconnected: code 1001, reason "going away"; reconnecting in 1000ms$`)),
+				expect.stringMatching(new RegExp(`^\\[agent-harness\\] ${iso} relay connected after \\d+s offline$`)),
+			]);
+		});
+	});
 });
 
 function helloParams() {

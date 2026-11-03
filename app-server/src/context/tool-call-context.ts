@@ -33,6 +33,16 @@ export interface VerifiedActor {
 	 * `actor.workspaceRoles?.includes('admin')`.
 	 */
 	workspaceRoles?: string[];
+	/**
+	 * Another app's id, from the Hub-signed `caller_app` claim. Present only when this app's
+	 * manifest declares the `caller_app` dispatch claim and the call came from another app.
+	 */
+	callerApp?: string;
+	/**
+	 * True when the Hub-signed `cross_room` claim marks the call as coming from a different room
+	 * than the one it targets. Present only when the manifest declares the `cross_room` claim.
+	 */
+	crossRoom?: boolean;
 	/** Raw claims subset safe for app policy (no token string). */
 	claims: Readonly<Record<string, unknown>>;
 	/** How this actor was established — see {@link VerifiedActorProvenance}. */

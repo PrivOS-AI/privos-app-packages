@@ -50,7 +50,7 @@ describe('scaffoldApp — --template instant', () => {
 		expect(pkg.devDependencies?.['@privos_ai/app-react']).toBe('^0.8.0');
 		expect(pkg.devDependencies?.vite).toBe('^5.0.0');
 		expect(pkg.devDependencies?.vitest).toBe('^2.1.9');
-		expect(pkg.engines.node).toBe('>=22');
+		expect(pkg.engines.node).toBe('>=22.23.4 <23');
 		expect(pkg.scripts.build).toBe('vite build');
 		expect(pkg.scripts.test).toBe('vitest run');
 		expect(pkg.scripts.typecheck).toBeDefined();
