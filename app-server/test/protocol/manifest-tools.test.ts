@@ -99,4 +99,18 @@ describe('manifest v3 tooling', () => {
 		expect(lintManifest({ ...manifest, exposedPorts: [{ name: 'api', port: 8080 }] }).errors)
 			.toContain('exposedPorts requires schemaVersion 3');
 	});
+
+	it('lints toolAccess against declared tools', () => {
+		const withTools = { ...manifest, tools: [{ name: 'read_page' }, { name: 'write_page' }] };
+		expect(lintManifest({ ...withTools, toolAccess: { read_page: 'shared' } }).valid).toBe(true);
+		expect(lintManifest({ ...withTools, toolAccess: {} }).valid).toBe(true);
+		expect(lintManifest({ ...withTools, toolAccess: { nope: 'shared' } }).errors)
+			.toContain('toolAccess key "nope" is not a tool declared in tools[]');
+		expect(lintManifest({ ...withTools, toolAccess: { read_page: 'own' } }).errors)
+			.toContain('toolAccess["read_page"] must be "shared"');
+		expect(lintManifest({ ...withTools, toolAccess: ['read_page'] }).errors).toContain('toolAccess must be an object');
+		const many = Object.fromEntries(Array.from({ length: 201 }, (_, i) => [`t${i}`, 'shared']));
+		const manyTools = { ...manifest, tools: Object.keys(many).map((name) => ({ name })), toolAccess: many };
+		expect(lintManifest(manyTools).errors).toContain('toolAccess allows at most 200 entries');
+	});
 });

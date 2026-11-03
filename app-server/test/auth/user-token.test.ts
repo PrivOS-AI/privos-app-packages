@@ -113,4 +113,21 @@ describe('verifyUserToken', () => {
 			expect(result.actor.workspaceRoles).toBeUndefined();
 		}
 	});
+
+	it('lifts caller_app / cross_room onto the actor and ignores malformed values', async () => {
+		const { jwks, sign, aud } = await mintTestKeys();
+		const opts = { jwksUrl: 'http://unused.invalid/jwks', audience: aud, localJwks: jwks };
+		const ok = await verifyUserToken(await sign({ sub: 'u', rid: 'r', caller_app: 'ai.x.app', cross_room: true }), opts);
+		expect(ok.ok).toBe(true);
+		if (ok.ok) {
+			expect(ok.actor.callerApp).toBe('ai.x.app');
+			expect(ok.actor.crossRoom).toBe(true);
+		}
+		const bad = await verifyUserToken(await sign({ sub: 'u', caller_app: 7, cross_room: 'yes' }), opts);
+		expect(bad.ok).toBe(true);
+		if (bad.ok) {
+			expect(bad.actor.callerApp).toBeUndefined();
+			expect(bad.actor.crossRoom).toBeUndefined();
+		}
+	});
 });
