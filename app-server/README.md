@@ -356,14 +356,16 @@ On the user-token path the Hub always sends `caller_app` and `ptype`, declared o
 Cluster dispatch, `caller_app` and `cross_room` are sent only when declared.
 
 - `actor.callerApp` - the calling app's id, when another app's server made the call.
-- `actor.crossRoom` - `true` when the call is made by another app's server. It is not a room
-  comparison.
+- `actor.crossRoom` - `true` when another app's server made the call and its bot cannot access
+  the target room (not a member of a private room, or no room named). Absent when that bot can
+  access the room, and on every call that is not from another app.
 - `actor.principalType === 'bot'` - the caller is automation (an agent or another app), never
   a person. Absent means "not marked", not "human". It is always undefined on App Cluster
   dispatch, whose assertion has no principal type.
 
 Deny by default. Never authorize a bot caller on `actor.roomId` alone: for another app's call
-the room is chosen by the caller and proves only that your app is bound there.
+the room is chosen by the caller and proves only that your app is bound there. Treat
+`actor.crossRoom === true` as a call from outside the room.
 
 ```ts
 const actor = assertActorAvailable(context, 'enforce');
