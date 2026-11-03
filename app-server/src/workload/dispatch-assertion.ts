@@ -77,6 +77,10 @@ export type VerifiedDispatchActor = Readonly<{
 	subject: string;
 	username?: string;
 	roomId?: string;
+	/** Other-app call: the calling app's appId (Hub signs it only for an app declaring `capabilities.caller_app`). */
+	callerApp?: string;
+	/** Other-app call (Hub signs it only for an app declaring `capabilities.cross_room`). */
+	crossRoom?: true;
 }>;
 
 export type VerifiedDispatchAssertion = Readonly<{
@@ -703,7 +707,7 @@ const CLUSTER_DISPATCH_V3_ROOM_KEYS = [
 
 /** Optional signed attribution claims understood by this SDK generation. */
 const CLUSTER_DISPATCH_V3_OPTIONAL_KEYS = ['actor'] as const;
-const CLUSTER_DISPATCH_V3_ACTOR_KEYS = ['subject', 'username', 'roomId'] as const;
+const CLUSTER_DISPATCH_V3_ACTOR_KEYS = ['subject', 'username', 'roomId', 'callerApp', 'crossRoom'] as const;
 
 function validClusterDispatchActorV3(value: unknown): value is VerifiedDispatchActor {
 	if (!isRecord(value)) return false;
@@ -715,7 +719,9 @@ function validClusterDispatchActorV3(value: unknown): value is VerifiedDispatchA
 		typeof value.subject === 'string' &&
 		value.subject.length >= 1 &&
 		(value.username === undefined || typeof value.username === 'string') &&
-		(value.roomId === undefined || typeof value.roomId === 'string')
+		(value.roomId === undefined || typeof value.roomId === 'string') &&
+		(value.callerApp === undefined || (typeof value.callerApp === 'string' && value.callerApp.length >= 1)) &&
+		(value.crossRoom === undefined || value.crossRoom === true)
 	);
 }
 
