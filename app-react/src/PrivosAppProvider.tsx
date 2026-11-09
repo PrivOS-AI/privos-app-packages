@@ -230,6 +230,12 @@ export interface PrivosHostContext {
 	 * document's root automatically by the provider — see `applyThemeTokens` below.
 	 */
 	themeTokens?: Record<string, string>;
+	/**
+	 * The Hub UI language as a canonical BCP 47 tag (`vi-VN`, `en`). Advertised by
+	 * `hostCapabilities.locale`. The provider does not set `<html lang>` from it: only the app
+	 * knows which language its own text is actually in.
+	 */
+	locale?: string;
 	roomId?: string;
 	[key: string]: unknown;
 }

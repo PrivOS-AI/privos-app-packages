@@ -29,6 +29,14 @@ export interface PrivosContext {
 	 * that does not respond to CSS variables).
 	 */
 	themeTokens?: Record<string, string>;
+	/**
+	 * The language the Hub UI is rendering in, as a canonical BCP 47 tag (`vi-VN`, `en`): the
+	 * user's own language, or the workspace default when the user has none. Pass it to `Intl`
+	 * formatters or use it to pick the app's own translation. Updated live when the user switches
+	 * language. Absent on a Hub that predates it and when the app runs outside a workspace, so
+	 * always fall back (e.g. `locale ?? navigator.language`).
+	 */
+	locale?: string;
 }
 
 const defaultState: PrivosContext = {
@@ -58,6 +66,7 @@ function mergeHostContext(previous: PrivosContext, patch: Record<string, unknown
 		...(stringValue('roomSlug') ? { roomSlug: stringValue('roomSlug') } : {}),
 		...(stringValue('appId') ? { appId: stringValue('appId') } : {}),
 		...(stringValue('appUrl') ? { appUrl: stringValue('appUrl') } : {}),
+		...(stringValue('locale') ? { locale: stringValue('locale') } : {}),
 		...(patch.themeTokens && typeof patch.themeTokens === 'object'
 			? { themeTokens: patch.themeTokens as Record<string, string> }
 			: previous.themeTokens

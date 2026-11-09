@@ -48,7 +48,7 @@ export default function App() {
 | Hook | Returns | Description |
 |------|---------|-------------|
 | `usePrivosApp()` | `McpApp` | MCP app instance for `callServerTool()` |
-| `usePrivosContext()` | `PrivosContext` | Non-secret user/room/theme display context fetched through `mcpapp.context.get` and merged with `HOST_CONTEXT_CHANGED` |
+| `usePrivosContext()` | `PrivosContext` | Non-secret user/room/theme/locale display context fetched through `mcpapp.context.get` and merged with `HOST_CONTEXT_CHANGED` |
 | `usePrivosCapability(scope)` | `{ resolved, granted, scope }` | Presentation helper for deterministic optional-feature degradation; Hub still authorizes every call |
 | `usePrivosTool(name, args)` | `{ data, loading, error, refetch }` | Auto-fetching tool call (for reads) |
 | `useLists(roomId)` | `{ data, loading, error }` | Lists in room |
@@ -172,6 +172,20 @@ button.primary {
 ```
 
 Always provide a fallback value so the app still looks reasonable standalone or before the first host context arrives. The raw token map is also available as `usePrivosContext().themeTokens` for the rare case an app needs a value in JS (e.g. to theme a `<canvas>`).
+
+## Language (locale)
+
+`usePrivosContext().locale` is the language the Privos user reads the Hub in, as a canonical BCP 47 tag (`vi-VN`, `en`): their own language, or the workspace default when they have none. It arrives on the same host-context push as `theme` (`>= 0.9.0`, advertised by `hostCapabilities.locale`) and updates live when the user switches language. Use it for `Intl` formatting and to pick your app's own translation:
+
+```tsx
+const { locale } = usePrivosContext();
+const lang = locale ?? navigator.language; // older Hub, or running outside a workspace
+
+const total = new Intl.NumberFormat(lang, { style: 'currency', currency: 'EUR' }).format(1234.5);
+const strings = lang.startsWith('vi') ? vi : en; // your own catalog
+```
+
+Unlike the theme, the provider applies nothing automatically: only your app knows which language its text is in, so set `document.documentElement.lang` yourself to the language you actually render. See [Locale Inheritance](https://github.com/PrivOS-AI/privos-dev-docs/blob/main/mcp-app-platform/locale-inheritance.md).
 
 ## License
 
