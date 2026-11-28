@@ -63,7 +63,13 @@ my-app/
 
 The example tool (`<app>_whoami`) shows the rules for identity: take the caller and the room only from `context.actor` and `context.roomId`, never from the arguments; refuse when there is no verified actor. `tools/list` is the manifest's own tool list and `tools/call` dispatches by name.
 
-The UI reads the lists of the room only when `usePrivosCapability('lists:read')` reports the grant, and shows a degraded state otherwise. `lists:read` is declared as an optional permission with a `degradedBehavior`, so a workspace admin can approve the app without it.
+The UI shows three habits that keep an app fast (both templates share them; the platform guide [Building fast apps](https://github.com/PrivOS-AI/privos-dev-docs/blob/main/mcp-app-platform/building-fast-apps.md) explains them):
+
+- It reads List data in the browser with `app.rest()` (`lists.listByRoomId`, then `items.query` for the list the user opens), so no read passes through the app server.
+- It draws the screen at once. Access checks and refreshes run in the background, and a problem or a question opens one dialog over the screen (`src/ui/notice-dialog.tsx`).
+- It is offline first: it shows the copy the browser saved last, then refreshes it (`src/ui/offline-cache.ts`, kept in `app.storage` and keyed by user and room).
+
+It reads the lists only when `usePrivosCapability('lists:read')` reports the grant, and the items only with `lists:query`. Both are declared as optional permissions with a `degradedBehavior`, so a workspace admin can approve the app without them.
 
 ### `instant`: a UI with no server
 
