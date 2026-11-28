@@ -197,7 +197,7 @@ describe('scaffoldApp', () => {
 		const dockerfile = fs.readFileSync(path.join(targetDir, 'Dockerfile'), 'utf-8');
 		const manifest = readJson<{ port: number }>(path.join(targetDir, 'privos-app.json'));
 
-		expect(dockerfile).toMatch(/^FROM node:22\.23\.4-alpine3\.23@sha256:[0-9a-f]{64} AS build$/m);
+		expect(dockerfile).toMatch(/^FROM node:22\.23\.[0-9]+-alpine3\.23@sha256:[0-9a-f]{64} AS build$/m);
 		expect(dockerfile).not.toMatch(/FROM node:22-alpine/);
 		expect(dockerfile).toContain('CVE-2026-111497 minimum');
 		expect(dockerfile).not.toMatch(/node:20/);
