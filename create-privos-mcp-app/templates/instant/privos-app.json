@@ -26,6 +26,15 @@
       "feature": "lists.overview",
       "reason": "Show the lists of the room the dashboard is open in.",
       "degradedBehavior": "The dashboard still opens and shows the room and the user, but it does not list the room's lists until this access is granted."
+    },
+    {
+      "scope": "lists:query",
+      "requirement": "optional",
+      "context": "room",
+      "executionContext": "user",
+      "feature": "lists.items",
+      "reason": "Show the first items of the list the user opens, read in the browser.",
+      "degradedBehavior": "The dashboard still shows the room's lists, but it does not show their items until this access is granted."
     }
   ],
   "ui": {
